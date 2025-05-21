@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # SoftLink项目一键部署脚本
-# 用于在云服务器上快速部署整个项目环境
+# 用于在腾讯云服务器上快速部署整个项目环境
 
 # 颜色定义
 RED='\033[0;31m'
@@ -14,14 +14,23 @@ NC='\033[0m' # 无颜色
 PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BACKEND_DIR="$PROJECT_ROOT/backend"
 FRONTEND_DIR="$PROJECT_ROOT/frontend"
-FRONTEND_BUILD_DIR="$FRONTEND_DIR/softlink-f"
+# 注意：前端构建目录是softlin-f而不是softlink-f
+FRONTEND_BUILD_DIR="$FRONTEND_DIR/softlin-f"
 LOG_FILE="$PROJECT_ROOT/deploy_log.txt"
 
-# 服务配置
+# 腾讯云服务配置
+SERVER_IP=$(hostname -I | awk '{print $1}')
 NGINX_PATH="/usr/local/nginx"
 NGINX_BIN="/usr/sbin/nginx" # 系统安装的nginx位置
 BACKEND_PORT=5000
 FRONTEND_PORT=80
+
+# 数据库配置
+DB_HOST="localhost"
+DB_PORT=5432
+DB_USER="postgres"
+DB_PASS="123.123.MengLi"
+DB_NAME="softlink"
 
 # 清空日志文件
 > $LOG_FILE
@@ -43,6 +52,44 @@ error() {
     echo -e "${RED}[错误]${NC} $1" | tee -a $LOG_FILE
 }
 
+# 首先停止可能已经运行的服务
+stop_services() {
+    log "===== 停止已运行的服务 ====="
+    
+    # 停止后端服务
+    if [ -f "$PROJECT_ROOT/backend.pid" ]; then
+        BACKEND_PID=$(cat "$PROJECT_ROOT/backend.pid")
+        if ps -p $BACKEND_PID > /dev/null; then
+            log "停止后端服务 (PID: $BACKEND_PID)..."
+            kill $BACKEND_PID
+            sleep 2
+            if ps -p $BACKEND_PID > /dev/null; then
+                log "后端服务未响应，强制终止..."
+                kill -9 $BACKEND_PID
+            fi
+        fi
+        rm -f "$PROJECT_ROOT/backend.pid"
+    fi
+    
+    # 查找并停止其他可能正在运行的后端进程
+    log "查找并停止其他Python进程..."
+    pkill -f "python.*startup.py" || true
+    
+    # 确保没有进程占用5000端口
+    log "确保端口5000没有被占用..."
+    PROCESS_USING_PORT=$(lsof -t -i:$BACKEND_PORT)
+    if [ ! -z "$PROCESS_USING_PORT" ]; then
+        log "终止占用端口5000的进程: $PROCESS_USING_PORT"
+        kill -9 $PROCESS_USING_PORT || true
+    fi
+    
+    # 停止Nginx服务
+    log "停止Nginx服务..."
+    sudo systemctl stop nginx || sudo nginx -s stop || true
+    
+    success "所有服务已停止"
+}
+
 # 检查命令是否存在
 check_command() {
     if ! command -v $1 &> /dev/null; then
@@ -58,9 +105,18 @@ check_command() {
 # 检查端口是否被占用
 check_port() {
     if lsof -i:$1 &> /dev/null; then
-        warn "端口 $1 已被占用，可能会导致服务启动失败"
-        echo -e "  占用进程: $(lsof -i:$1 | tail -n +2)" | tee -a $LOG_FILE
-        return 1
+        warn "端口 $1 已被占用，尝试关闭占用进程..."
+        # 尝试终止占用该端口的进程
+        lsof -t -i:$1 | xargs kill -9 || true
+        sleep 2
+        if lsof -i:$1 &> /dev/null; then
+            error "无法释放端口 $1，请手动终止占用进程"
+            echo -e "  占用进程: $(lsof -i:$1 | tail -n +2)" | tee -a $LOG_FILE
+            return 1
+        else
+            success "端口 $1 已释放"
+            return 0
+        fi
     else
         success "端口 $1 可用"
         return 0
@@ -130,6 +186,54 @@ setup_backend() {
         return 1
     fi
     
+    # 更新 .env 文件中的数据库配置
+    log "更新后端环境配置..."
+    if [ -f "$PROJECT_ROOT/.env" ]; then
+        log "找到.env文件，更新数据库配置..."
+        # 备份原有.env文件
+        cp "$PROJECT_ROOT/.env" "$PROJECT_ROOT/.env.backup"
+        
+        # 更新数据库连接 URL
+        sed -i "s|DATABASE_URL=.*|DATABASE_URL=postgresql://$DB_USER:$DB_PASS@$DB_HOST:$DB_PORT/$DB_NAME|g" "$PROJECT_ROOT/.env"
+        
+        # 更新调试标志
+        sed -i "s|DEBUG=.*|DEBUG=False|g" "$PROJECT_ROOT/.env"
+        
+        # 确保SECRET_KEY已设置
+        if grep -q "your-super-secret-key" "$PROJECT_ROOT/.env"; then
+            NEW_SECRET_KEY=$(openssl rand -hex 32)
+            NEW_JWT_KEY=$(openssl rand -hex 32)
+            sed -i "s|SECRET_KEY=.*|SECRET_KEY=$NEW_SECRET_KEY|g" "$PROJECT_ROOT/.env"
+            sed -i "s|JWT_SECRET_KEY=.*|JWT_SECRET_KEY=$NEW_JWT_KEY|g" "$PROJECT_ROOT/.env"
+            log "生成了新的安全密钥"
+        fi
+    else
+        log "未找到.env文件，创建新文件..."
+        NEW_SECRET_KEY=$(openssl rand -hex 32)
+        NEW_JWT_KEY=$(openssl rand -hex 32)
+        
+        cat > "$PROJECT_ROOT/.env" << EOL
+# Flask配置
+FLASK_ENV=production
+FLASK_APP=app.py
+
+# 数据库配置
+DATABASE_URL=postgresql://$DB_USER:$DB_PASS@$DB_HOST:$DB_PORT/$DB_NAME
+
+# Redis配置
+# REDIS_URL=redis://localhost:6379/0
+
+# 安全配置
+SECRET_KEY=$NEW_SECRET_KEY
+JWT_SECRET_KEY=$NEW_JWT_KEY
+
+# 其他配置
+DEBUG=False
+TESTING=False
+EOL
+        log "创建了新的.env配置文件"
+    fi
+    
     success "后端环境设置完成"
     return 0
 }
@@ -144,9 +248,62 @@ setup_nginx() {
         return 1
     fi
     
-    # 修改Nginx配置中的路径为实际路径
+    # 修改Nginx配置中的路径和服务名
     log "更新Nginx配置文件..."
-    sed -i "s|D:/workplace/SoftLink/SoftLink-0517|$PROJECT_ROOT|g" "$FRONTEND_DIR/nginx.softlink.conf"
+    
+    # 创建临时配置文件
+    cat > "$FRONTEND_DIR/nginx.temp.conf" << EOL
+server {
+    listen 80;
+    server_name $SERVER_IP;
+    
+    # GZIP压缩配置，提高传输效率
+    gzip on;
+    gzip_comp_level 5;
+    gzip_min_length 256;
+    gzip_proxied any;
+    gzip_types
+        application/javascript
+        application/json
+        application/xml
+        text/css
+        text/plain
+        text/xml
+        image/svg+xml;
+    
+    # 静态资源缓存设置
+    location /static/ {
+        alias $PROJECT_ROOT/frontend/softlin-f/static/;
+        expires 30d;
+        add_header Cache-Control "public, no-transform";
+    }
+    
+    # API请求代理到后端
+    location /api/ {
+        proxy_pass http://localhost:$BACKEND_PORT/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host \$host;
+        proxy_cache_bypass \$http_upgrade;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    }
+    
+    # 所有其他请求返回index.html (单页应用配置)
+    location / {
+        root $PROJECT_ROOT/frontend/softlin-f;
+        try_files \$uri \$uri/ /index.html;
+        index index.html;
+    }
+    
+    # 错误页面配置
+    error_page 500 502 503 504 /50x.html;
+    location = /50x.html {
+        root $PROJECT_ROOT/frontend/softlin-f;
+    }
+}
+EOL
     
     # 复制配置文件
     log "应用Nginx配置..."
@@ -159,7 +316,7 @@ setup_nginx() {
         return 1
     fi
     
-    sudo cp -f "$FRONTEND_DIR/nginx.softlink.conf" "$NGINX_CONF_DIR/nginx.conf"
+    sudo cp -f "$FRONTEND_DIR/nginx.temp.conf" "$NGINX_CONF_DIR/nginx.conf"
     
     # 测试配置
     log "测试Nginx配置..."
@@ -190,7 +347,7 @@ start_backend() {
     
     # 启动后端服务
     log "启动后端服务..."
-    nohup python startup.py > backend.log 2>&1 &
+    nohup python startup.py > $BACKEND_DIR/backend.log 2>&1 &
     BACKEND_PID=$!
     
     # 检查服务是否成功启动
@@ -200,6 +357,7 @@ start_backend() {
         echo $BACKEND_PID > "$PROJECT_ROOT/backend.pid"
     else
         error "后端服务启动失败，请检查backend.log文件"
+        cat $BACKEND_DIR/backend.log | tail -n 20 | tee -a $LOG_FILE
         return 1
     fi
     
@@ -208,7 +366,8 @@ start_backend() {
     if lsof -i:$BACKEND_PORT -P -n | grep LISTEN > /dev/null; then
         success "后端服务正在监听端口 $BACKEND_PORT"
     else
-        warn "后端服务可能未正确监听端口 $BACKEND_PORT"
+        warn "后端服务可能未正确监听端口 $BACKEND_PORT，尝试查看日志..."
+        cat $BACKEND_DIR/backend.log | tail -n 20 | tee -a $LOG_FILE
     fi
     
     return 0
@@ -220,8 +379,17 @@ start_frontend() {
     
     # 检查前端构建目录
     if [ ! -d "$FRONTEND_BUILD_DIR" ]; then
-        error "未找到前端构建目录: $FRONTEND_BUILD_DIR"
-        return 1
+        warn "未找到前端构建目录: $FRONTEND_BUILD_DIR"
+        log "检查是否存在softlink-f目录..."
+        
+        # 尝试重命名目录
+        if [ -d "$FRONTEND_DIR/softlink-f" ]; then
+            log "找到softlink-f目录，重命名为softlin-f..."
+            mv "$FRONTEND_DIR/softlink-f" "$FRONTEND_BUILD_DIR"
+        else
+            error "未找到任何前端构建目录"
+            return 1
+        fi
     fi
     
     # 检查index.html
@@ -249,6 +417,8 @@ start_frontend() {
         success "Nginx服务启动成功"
     else
         error "Nginx服务启动失败"
+        log "检查Nginx错误日志..."
+        cat /var/log/nginx/error.log | tail -n 20 | tee -a $LOG_FILE
         return 1
     fi
     
@@ -279,7 +449,7 @@ health_check() {
     else
         error "无法访问后端API"
         warn "可能原因: 1.后端服务未启动 2.防火墙阻止 3.端口配置错误"
-        warn "解决方案: 检查后端日志(backend.log)，确保服务正常启动且监听正确端口"
+        warn "解决方案: 检查后端日志($BACKEND_DIR/backend.log)，确保服务正常启动且监听正确端口"
     fi
     
     # 检查Nginx服务
@@ -302,6 +472,31 @@ health_check() {
     fi
     
     log "健康检查完成，详细日志请查看: $LOG_FILE"
+}
+
+# 检查防火墙配置
+check_firewall() {
+    log "===== 检查防火墙配置 ====="
+    
+    # 检查常见防火墙工具
+    if command -v ufw &> /dev/null; then
+        # Ubuntu等使用ufw
+        log "使用ufw配置防火墙..."
+        sudo ufw allow 80/tcp
+        sudo ufw allow $BACKEND_PORT/tcp
+        sudo ufw status | tee -a $LOG_FILE
+    elif command -v firewall-cmd &> /dev/null; then
+        # CentOS等使用firewalld
+        log "使用firewalld配置防火墙..."
+        sudo firewall-cmd --permanent --add-port=80/tcp
+        sudo firewall-cmd --permanent --add-port=$BACKEND_PORT/tcp
+        sudo firewall-cmd --reload
+        sudo firewall-cmd --list-all | tee -a $LOG_FILE
+    else
+        warn "未检测到标准防火墙工具，请手动确保端口80和$BACKEND_PORT开放"
+    fi
+    
+    success "防火墙配置检查完成"
 }
 
 # 显示系统信息
@@ -350,9 +545,17 @@ else
     pkill -f "python.*startup.py"
 fi
 
+# 查找并终止占用5000端口的进程
+echo "查找并终止占用5000端口的进程..."
+PROCESS_USING_PORT=\$(lsof -t -i:$BACKEND_PORT)
+if [ ! -z "\$PROCESS_USING_PORT" ]; then
+    echo "终止占用端口$BACKEND_PORT的进程: \$PROCESS_USING_PORT"
+    kill -9 \$PROCESS_USING_PORT || true
+fi
+
 # 停止Nginx服务
 echo "停止Nginx服务..."
-sudo systemctl stop nginx || sudo nginx -s stop
+sudo systemctl stop nginx || sudo nginx -s stop || true
 
 echo "SoftLink服务已停止"
 EOF
@@ -365,6 +568,9 @@ EOF
 main() {
     log "开始部署SoftLink项目..."
     
+    # 首先停止已运行的服务
+    stop_services
+    
     # 检查系统环境
     check_system_env
     
@@ -374,6 +580,9 @@ main() {
         error "后端环境设置失败，部署中止"
         exit 1
     fi
+    
+    # 检查防火墙配置
+    check_firewall
     
     # 配置Nginx
     setup_nginx
