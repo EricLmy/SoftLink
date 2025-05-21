@@ -32,8 +32,27 @@ DB_USER="postgres"
 DB_PASS="123.123.MengLi"
 DB_NAME="softlink"
 
+# 是否更新安全密钥
+UPDATE_SECURITY_KEYS=false
+
 # 清空日志文件
 > $LOG_FILE
+
+# 解析命令行参数
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --update-keys)
+      UPDATE_SECURITY_KEYS=true
+      shift
+      ;;
+    *)
+      # 未知参数
+      echo "未知参数: $1"
+      echo "可用参数: --update-keys (更新安全密钥)"
+      shift
+      ;;
+  esac
+done
 
 # 输出信息函数
 log() {
@@ -199,13 +218,27 @@ setup_backend() {
         # 更新调试标志
         sed -i "s|DEBUG=.*|DEBUG=False|g" "$PROJECT_ROOT/.env"
         
-        # 确保SECRET_KEY已设置
-        if grep -q "your-super-secret-key" "$PROJECT_ROOT/.env"; then
+        # 根据参数决定是否更新安全密钥
+        if [ "$UPDATE_SECURITY_KEYS" = true ]; then
+            log "更新安全密钥..."
             NEW_SECRET_KEY=$(openssl rand -hex 32)
             NEW_JWT_KEY=$(openssl rand -hex 32)
             sed -i "s|SECRET_KEY=.*|SECRET_KEY=$NEW_SECRET_KEY|g" "$PROJECT_ROOT/.env"
             sed -i "s|JWT_SECRET_KEY=.*|JWT_SECRET_KEY=$NEW_JWT_KEY|g" "$PROJECT_ROOT/.env"
-            log "生成了新的安全密钥"
+            success "已生成新的安全密钥"
+            warn "注意：更新密钥会导致所有现有用户会话和JWT令牌失效"
+        else
+            # 如果密钥是默认值，无论如何都要更新
+            if grep -q "your-super-secret-key" "$PROJECT_ROOT/.env"; then
+                log "检测到默认密钥，更新为安全密钥..."
+                NEW_SECRET_KEY=$(openssl rand -hex 32)
+                NEW_JWT_KEY=$(openssl rand -hex 32)
+                sed -i "s|SECRET_KEY=.*|SECRET_KEY=$NEW_SECRET_KEY|g" "$PROJECT_ROOT/.env"
+                sed -i "s|JWT_SECRET_KEY=.*|JWT_SECRET_KEY=$NEW_JWT_KEY|g" "$PROJECT_ROOT/.env"
+                success "已生成新的安全密钥"
+            else
+                log "保留现有安全密钥"
+            fi
         fi
     else
         log "未找到.env文件，创建新文件..."
@@ -513,6 +546,12 @@ show_system_info() {
     echo -e "后端API地址: ${BLUE}http://$SERVER_IP:$BACKEND_PORT${NC}"
     echo -e "部署日志文件: ${YELLOW}$LOG_FILE${NC}"
     echo -e "\n如需停止服务，请运行: ${YELLOW}$PROJECT_ROOT/stop_softlink.sh${NC}"
+    
+    # 显示安全密钥更新信息
+    if [ "$UPDATE_SECURITY_KEYS" = true ]; then
+        echo -e "${YELLOW}安全密钥已更新，所有现有会话将失效${NC}"
+    fi
+    
     echo -e "${GREEN}==================================${NC}\n"
 }
 
@@ -564,9 +603,26 @@ EOF
     success "已创建停止脚本: $PROJECT_ROOT/stop_softlink.sh"
 }
 
+# 显示使用帮助
+show_help() {
+    echo "SoftLink项目部署脚本"
+    echo "用法: ./deploy_softlink.sh [选项]"
+    echo ""
+    echo "选项:"
+    echo "  --update-keys    更新安全密钥（会使现有会话失效）"
+    echo ""
+    echo "示例:"
+    echo "  ./deploy_softlink.sh              # 正常部署，保留现有密钥"
+    echo "  ./deploy_softlink.sh --update-keys # 部署并更新安全密钥"
+}
+
 # 主函数
 main() {
+    # 显示脚本参数信息
     log "开始部署SoftLink项目..."
+    if [ "$UPDATE_SECURITY_KEYS" = true ]; then
+        log "参数: 将更新安全密钥"
+    fi
     
     # 首先停止已运行的服务
     stop_services
@@ -616,6 +672,12 @@ main() {
     
     log "SoftLink项目部署完成"
 }
+
+# 如果带--help参数，显示帮助
+if [[ "$1" == "--help" ]]; then
+    show_help
+    exit 0
+fi
 
 # 执行主函数
 main 
