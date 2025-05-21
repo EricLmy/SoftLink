@@ -14,6 +14,7 @@ import subprocess
 import time
 import socket
 import importlib
+import argparse
 from contextlib import contextmanager
 
 # 定义颜色码，用于终端输出
@@ -22,6 +23,13 @@ YELLOW = '\033[93m'
 RED = '\033[91m'
 END = '\033[0m'
 BOLD = '\033[1m'
+
+# 解析命令行参数
+def parse_args():
+    parser = argparse.ArgumentParser(description='SoftLink后端服务启动脚本')
+    parser.add_argument('--port', type=int, default=int(os.environ.get('FLASK_RUN_PORT', 5000)),
+                      help='指定后端服务端口（默认：5000或环境变量FLASK_RUN_PORT）')
+    return parser.parse_args()
 
 def print_status(message, status='info'):
     """打印带有颜色的状态信息"""
@@ -209,14 +217,21 @@ def create_initial_user():
         print_status(f"检查/创建初始用户时出错: {str(e)}", 'error')
         return False
 
-def start_backend_service():
+def start_backend_service(port=5000):
     """启动后端服务"""
-    print_status("准备启动后端服务...", 'info')
+    print_status(f"准备启动后端服务在端口 {port}...", 'info')
+    
+    # 设置环境变量
+    os.environ['FLASK_RUN_PORT'] = str(port)
     
     if os.path.exists('run.py'):
-        print_status("正在启动后端服务...", 'info')
+        print_status(f"正在启动后端服务在端口 {port}...", 'info')
         try:
-            subprocess.run([sys.executable, 'run.py'], check=True)
+            # 使用subprocess启动，并传递端口参数
+            cmd = [sys.executable, 'run.py']
+            env = os.environ.copy()
+            env['FLASK_RUN_PORT'] = str(port)
+            subprocess.run(cmd, env=env, check=True)
             return True
         except subprocess.CalledProcessError as e:
             print_status(f"启动后端服务时出错: {str(e)}", 'error')
@@ -227,7 +242,12 @@ def start_backend_service():
 
 def main():
     """主函数：按顺序执行所有检查，然后启动服务"""
+    # 解析命令行参数
+    args = parse_args()
+    port = args.port
+    
     print_status(f"{BOLD}开始 SoftLink 后端服务启动流程{END}", 'info')
+    print_status(f"将使用端口: {port}", 'info')
     
     # 更改工作目录到脚本所在目录
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -239,7 +259,7 @@ def main():
         ("依赖检查", check_dependencies),
         ("配置文件检查", check_config_files),
         ("数据库连接检查", check_database_connection),
-        ("端口可用性检查", check_port_available),
+        ("端口可用性检查", lambda: check_port_available(port)),
         ("数据库表检查", check_database_tables)
     ]
     
@@ -271,7 +291,7 @@ def main():
         
         # 启动服务
         print_status(f"{BOLD}所有检查通过或被忽略，正在启动后端服务...{END}", 'success')
-        start_backend_service()
+        start_backend_service(port)
     else:
         print_status(f"{BOLD}某些检查未通过，请解决问题后再尝试启动服务{END}", 'error')
 

@@ -1,4 +1,5 @@
 import os
+import sys
 from app import create_app, db # 从当前目录的app模块导入
 # from app.models import User # Example: Import models for migration or shell context
 
@@ -10,4 +11,7 @@ def make_shell_context():
     return dict(db=db)
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('FLASK_RUN_PORT', 5000))) 
+    # 从环境变量获取端口，如果没有则使用默认值5000
+    port = int(os.environ.get('FLASK_RUN_PORT', 5000))
+    print(f"启动服务在端口: {port}")
+    app.run(host='0.0.0.0', port=port) 

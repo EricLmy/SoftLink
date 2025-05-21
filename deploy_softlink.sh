@@ -764,6 +764,18 @@ start_backend() {
     # 确保环境变量中包含端口设置
     export FLASK_RUN_PORT=$BACKEND_PORT
     
+    # 更新.env文件中的端口配置
+    if [ -f "$ENV_FILE" ]; then
+        log "更新.env文件中的端口配置..."
+        if grep -q "FLASK_RUN_PORT=" "$ENV_FILE"; then
+            sed -i "s|FLASK_RUN_PORT=.*|FLASK_RUN_PORT=$BACKEND_PORT|g" "$ENV_FILE"
+        else
+            # 如果不存在FLASK_RUN_PORT配置，则添加
+            sed -i "/FLASK_APP=.*/a FLASK_RUN_PORT=$BACKEND_PORT" "$ENV_FILE"
+        fi
+        success "已更新.env文件中的端口配置为 $BACKEND_PORT"
+    fi
+    
     # 启动后端服务
     log "启动后端服务在端口 $BACKEND_PORT..."
     nohup python startup.py --port $BACKEND_PORT > $BACKEND_DIR/backend.log 2>&1 &
