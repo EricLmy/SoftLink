@@ -3,6 +3,34 @@
 # SoftLink项目一键部署脚本
 # 用于在腾讯云服务器上快速部署整个项目环境
 
+# 确保脚本以正确的权限运行
+if [ "$(id -u)" != "0" ] && [ "$1" != "--no-root" ]; then
+    echo "此脚本需要root权限运行。"
+    echo "如果确定不需要root权限，请使用 --no-root 参数运行。"
+    exec sudo "$0" "$@"
+    exit $?
+fi
+
+# 设置环境变量隔离
+set -e  # 遇到错误立即退出
+set -u  # 使用未定义的变量时报错
+export LC_ALL=C  # 使用标准语言环境
+export LANG=C    # 使用标准语言环境
+umask 022        # 设置安全的文件权限掩码
+
+# 防止脚本重复运行
+LOCK_FILE="/tmp/softlink_deploy.lock"
+if [ -f "$LOCK_FILE" ]; then
+    LOCK_PID=$(cat "$LOCK_FILE")
+    if ps -p $LOCK_PID > /dev/null; then
+        echo "错误：部署脚本已在运行 (PID: $LOCK_PID)"
+        echo "如果确定没有其他实例在运行，请删除锁文件：$LOCK_FILE"
+        exit 1
+    fi
+fi
+echo $$ > "$LOCK_FILE"
+trap 'rm -f "$LOCK_FILE"' EXIT
+
 # 颜色定义
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -16,7 +44,20 @@ BACKEND_DIR="$PROJECT_ROOT/backend"
 FRONTEND_DIR="$PROJECT_ROOT/frontend"
 # 注意：前端构建目录是softlin-f而不是softlink-f
 FRONTEND_BUILD_DIR="$FRONTEND_DIR/softlin-f"
-LOG_FILE="$PROJECT_ROOT/deploy_log.txt"
+LOG_DIR="$PROJECT_ROOT/logs"
+LOG_FILE="$LOG_DIR/deploy_$(date +%Y%m%d_%H%M%S).log"
+ERROR_LOG="$LOG_DIR/error.log"
+CURRENT_LOG_LINK="$LOG_DIR/current.log"
+MAX_LOG_FILES=10
+BACKUP_DIR="$PROJECT_ROOT/backups/$(date +%Y%m%d_%H%M%S)"
+CONFIG_BACKUP_DIR="$BACKUP_DIR/configs"
+
+# 创建备份目录
+mkdir -p "$CONFIG_BACKUP_DIR"
+
+# 配置文件路径
+ENV_FILE="$PROJECT_ROOT/.env"
+NGINX_CONF="$FRONTEND_DIR/nginx.softlink.conf"
 
 # 腾讯云服务配置
 SERVER_IP=$(hostname -I | awk '{print $1}')
@@ -25,18 +66,119 @@ NGINX_BIN="/usr/sbin/nginx" # 系统安装的nginx位置
 BACKEND_PORT=5000
 FRONTEND_PORT=80
 
-# 数据库配置
-DB_HOST="localhost"
-DB_PORT=5432
-DB_USER="postgres"
-DB_PASS="123.123.MengLi"
-DB_NAME="softlink"
+# 数据库配置（从环境变量读取，如果没有则使用默认值）
+DB_HOST="${DB_HOST:-localhost}"
+DB_PORT="${DB_PORT:-5432}"
+DB_USER="${DB_USER:-postgres}"
+DB_PASS="${DB_PASS:-123.123.MengLi}"
+DB_NAME="${DB_NAME:-softlink}"
 
 # 是否更新安全密钥
 UPDATE_SECURITY_KEYS=false
 
-# 清空日志文件
-> $LOG_FILE
+# 初始化日志系统
+init_logging() {
+    # 创建日志目录
+    mkdir -p "$LOG_DIR"
+    
+    # 创建新的日志文件
+    touch "$LOG_FILE"
+    
+    # 更新当前日志链接
+    ln -sf "$LOG_FILE" "$CURRENT_LOG_LINK"
+    
+    # 清理旧日志文件
+    find "$LOG_DIR" -name "deploy_*.log" -type f | sort -r | tail -n +$((MAX_LOG_FILES + 1)) | xargs -r rm
+    
+    # 记录部署开始信息
+    log "===== 开始部署 SoftLink 项目 ====="
+    log "部署时间: $(date '+%Y-%m-%d %H:%M:%S')"
+    log "服务器信息:"
+    log "  - 主机名: $(hostname)"
+    log "  - IP地址: $SERVER_IP"
+    log "  - 操作系统: $(cat /etc/os-release | grep PRETTY_NAME | cut -d'"' -f2)"
+    log "  - 内核版本: $(uname -r)"
+}
+
+# 改进的日志函数
+log() {
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo -e "${BLUE}[$timestamp]${NC} $1" | tee -a "$LOG_FILE"
+}
+
+success() {
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo -e "${GREEN}[$timestamp][成功]${NC} $1" | tee -a "$LOG_FILE"
+}
+
+warn() {
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo -e "${YELLOW}[$timestamp][警告]${NC} $1" | tee -a "$LOG_FILE"
+    echo "[$timestamp][警告] $1" >> "$ERROR_LOG"
+}
+
+error() {
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo -e "${RED}[$timestamp][错误]${NC} $1" | tee -a "$LOG_FILE"
+    echo "[$timestamp][错误] $1" >> "$ERROR_LOG"
+}
+
+# 错误处理函数
+handle_error() {
+    local exit_code=$1
+    local error_message=$2
+    local function_name=$3
+    
+    error "在执行 $function_name 时发生错误 (代码: $exit_code)"
+    error "$error_message"
+    
+    # 记录错误详情到错误日志
+    {
+        echo "----------------------------------------"
+        echo "错误时间: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "错误位置: $function_name"
+        echo "错误代码: $exit_code"
+        echo "错误信息: $error_message"
+        echo "调用栈:"
+        local frame=0
+        while caller $frame; do
+            ((frame++))
+        done
+        echo "----------------------------------------"
+    } >> "$ERROR_LOG"
+    
+    # 如果存在备份，提示恢复选项
+    if [ -d "$BACKUP_DIR" ]; then
+        warn "发现配置备份目录: $BACKUP_DIR"
+        echo "您可以使用以下命令恢复配置:"
+        echo "  cp $BACKUP_DIR/configs/.env.backup $PROJECT_ROOT/.env"
+        echo "  cp $BACKUP_DIR/configs/nginx.softlink.conf.backup $FRONTEND_DIR/nginx.softlink.conf"
+    fi
+    
+    # 清理临时文件和进程
+    cleanup
+    
+    return $exit_code
+}
+
+# 清理函数
+cleanup() {
+    log "===== 清理临时文件和进程 ====="
+    
+    # 删除临时文件
+    rm -f "$FRONTEND_DIR/nginx.temp.conf"
+    
+    # 如果部署失败，清理PID文件
+    if [ $? -ne 0 ]; then
+        rm -f "$PROJECT_ROOT/backend.pid"
+    fi
+    
+    # 记录清理完成
+    log "清理完成"
+}
+
+# 设置错误处理陷阱
+trap 'handle_error $? "意外终止" "${FUNCNAME[0]}"' ERR
 
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
@@ -45,30 +187,168 @@ while [[ $# -gt 0 ]]; do
       UPDATE_SECURITY_KEYS=true
       shift
       ;;
+    --no-root)
+      shift
+      ;;
+    --force)
+      FORCE_MODE=true
+      shift
+      ;;
     *)
       # 未知参数
       echo "未知参数: $1"
-      echo "可用参数: --update-keys (更新安全密钥)"
+      echo "可用参数: --update-keys (更新安全密钥), --no-root (不使用root权限), --force (强制模式)"
       shift
       ;;
   esac
 done
 
-# 输出信息函数
-log() {
-    echo -e "${BLUE}[$(date '+%Y-%m-%d %H:%M:%S')]${NC} $1" | tee -a $LOG_FILE
+# 检查端口是否被占用并尝试释放
+check_and_free_port() {
+    local PORT=$1
+    local SERVICE_NAME=$2
+    local FORCE=$3
+    
+    log "检查端口 $PORT 是否被占用..."
+    
+    # 检查端口是否被占用
+    if lsof -i:$PORT -P -n &> /dev/null; then
+        warn "端口 $PORT 已被占用，尝试识别占用进程..."
+        
+        # 获取占用端口的进程信息
+        local PID_INFO=$(lsof -i:$PORT -P -n | grep LISTEN)
+        local PID=$(echo "$PID_INFO" | awk '{print $2}')
+        local PROCESS_NAME=$(echo "$PID_INFO" | awk '{print $1}')
+        local PROCESS_USER=$(ps -o user= -p $PID)
+        
+        warn "端口 $PORT 被进程 $PROCESS_NAME (PID: $PID, 用户: $PROCESS_USER) 占用"
+        
+        # 检查是否是我们自己的服务
+        local IS_OUR_SERVICE=false
+        if [[ "$PROCESS_NAME" == *"python"* ]] && [[ "$SERVICE_NAME" == "backend" ]]; then
+            IS_OUR_SERVICE=true
+        elif [[ "$PROCESS_NAME" == *"nginx"* ]] && [[ "$SERVICE_NAME" == "nginx" ]]; then
+            IS_OUR_SERVICE=true
+        fi
+        
+        # 如果不是强制模式且不是我们的服务，询问用户
+        if [ "$FORCE" != "true" ] && [ "$IS_OUR_SERVICE" != "true" ]; then
+            echo -e "${YELLOW}警告：端口 $PORT 被其他服务占用。${NC}"
+            echo "进程信息："
+            echo "  名称：$PROCESS_NAME"
+            echo "  PID：$PID"
+            echo "  用户：$PROCESS_USER"
+            read -p "是否终止该进程？(y/n): " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                error "用户取消操作"
+                return 1
+            fi
+        fi
+        
+        # 尝试优雅终止进程
+        log "尝试优雅终止进程 $PID..."
+        kill -15 $PID
+        
+        # 等待进程终止
+        local WAIT_TIME=0
+        while ps -p $PID &> /dev/null && [ $WAIT_TIME -lt 10 ]; do
+            sleep 1
+            WAIT_TIME=$((WAIT_TIME + 1))
+        done
+        
+        # 如果进程仍然存在，尝试强制终止
+        if ps -p $PID &> /dev/null; then
+            warn "进程未响应，尝试强制终止..."
+            kill -9 $PID
+            sleep 1
+        fi
+        
+        # 最终检查
+        if lsof -i:$PORT -P -n &> /dev/null; then
+            error "无法释放端口 $PORT，请手动检查并终止占用进程"
+            return 1
+        else
+            success "端口 $PORT 已成功释放"
+        fi
+    else
+        success "端口 $PORT 可用"
+    fi
+    
+    return 0
 }
 
-success() {
-    echo -e "${GREEN}[成功]${NC} $1" | tee -a $LOG_FILE
-}
-
-warn() {
-    echo -e "${YELLOW}[警告]${NC} $1" | tee -a $LOG_FILE
-}
-
-error() {
-    echo -e "${RED}[错误]${NC} $1" | tee -a $LOG_FILE
+# 检查服务是否已运行
+check_service_status() {
+    log "===== 检查服务状态 ====="
+    
+    local SERVICES_RUNNING=false
+    local FORCE_STOP=${1:-false}
+    
+    # 检查后端服务
+    local BACKEND_RUNNING=false
+    if [ -f "$PROJECT_ROOT/backend.pid" ]; then
+        BACKEND_PID=$(cat "$PROJECT_ROOT/backend.pid")
+        if ps -p $BACKEND_PID > /dev/null; then
+            warn "后端服务已在运行 (PID: $BACKEND_PID)"
+            BACKEND_RUNNING=true
+            SERVICES_RUNNING=true
+        fi
+    fi
+    
+    # 检查是否有Python进程运行startup.py
+    STARTUP_PID=$(pgrep -f "python.*startup.py" || echo "")
+    if [ ! -z "$STARTUP_PID" ]; then
+        if [ "$BACKEND_RUNNING" = false ]; then
+            warn "检测到startup.py进程正在运行 (PID: $STARTUP_PID)"
+            SERVICES_RUNNING=true
+        fi
+    fi
+    
+    # 检查Nginx是否运行
+    local NGINX_RUNNING=false
+    if systemctl is-active --quiet nginx || pgrep nginx > /dev/null; then
+        warn "Nginx服务已在运行"
+        NGINX_RUNNING=true
+        SERVICES_RUNNING=true
+    fi
+    
+    # 检查关键端口
+    local PORTS_OCCUPIED=false
+    if lsof -i:$BACKEND_PORT -P -n &> /dev/null; then
+        warn "后端端口 $BACKEND_PORT 被占用"
+        PORTS_OCCUPIED=true
+    fi
+    
+    if lsof -i:$FRONTEND_PORT -P -n &> /dev/null; then
+        warn "前端端口 $FRONTEND_PORT 被占用"
+        PORTS_OCCUPIED=true
+    fi
+    
+    # 如果有服务正在运行或端口被占用
+    if [ "$SERVICES_RUNNING" = true ] || [ "$PORTS_OCCUPIED" = true ]; then
+        if [ "$FORCE_STOP" = true ]; then
+            log "强制停止现有服务..."
+            stop_services "force"
+        else
+            echo -e "${YELLOW}检测到SoftLink服务已在运行或端口被占用。${NC}"
+            read -p "是否停止现有服务并重新部署? (y/n): " -n 1 -r
+            echo
+            if [[ $REPLY =~ ^[Yy]$ ]]; then
+                log "停止现有服务..."
+                stop_services
+            else
+                log "用户选择保留现有服务，退出部署"
+                exit 0
+            fi
+        fi
+    fi
+    
+    # 确保端口可用
+    check_and_free_port $BACKEND_PORT "backend" "$FORCE_STOP" || exit 1
+    check_and_free_port $FRONTEND_PORT "nginx" "$FORCE_STOP" || exit 1
+    
+    success "服务状态检查完成"
 }
 
 # 首先停止可能已经运行的服务
@@ -92,21 +372,48 @@ stop_services() {
     
     # 查找并停止其他可能正在运行的后端进程
     log "查找并停止其他Python进程..."
-    pkill -f "python.*startup.py" || true
+    STARTUP_PIDS=$(pgrep -f "python.*startup.py" || echo "")
+    if [ ! -z "$STARTUP_PIDS" ]; then
+        log "找到startup.py进程，终止中..."
+        echo $STARTUP_PIDS | xargs kill -9 2>/dev/null || true
+    fi
     
-    # 确保没有进程占用5000端口
-    log "确保端口5000没有被占用..."
-    PROCESS_USING_PORT=$(lsof -t -i:$BACKEND_PORT)
+    # 确保没有进程占用后端端口
+    log "确保端口$BACKEND_PORT没有被占用..."
+    PROCESS_USING_PORT=$(lsof -t -i:$BACKEND_PORT 2>/dev/null || echo "")
     if [ ! -z "$PROCESS_USING_PORT" ]; then
-        log "终止占用端口5000的进程: $PROCESS_USING_PORT"
-        kill -9 $PROCESS_USING_PORT || true
+        log "终止占用端口$BACKEND_PORT的进程: $PROCESS_USING_PORT"
+        echo $PROCESS_USING_PORT | xargs kill -9 2>/dev/null || true
     fi
     
     # 停止Nginx服务
     log "停止Nginx服务..."
-    sudo systemctl stop nginx || sudo nginx -s stop || true
+    sudo systemctl stop nginx 2>/dev/null || sudo nginx -s stop 2>/dev/null || true
     
-    success "所有服务已停止"
+    # 确保Nginx完全停止
+    NGINX_PIDS=$(pgrep nginx || echo "")
+    if [ ! -z "$NGINX_PIDS" ]; then
+        log "强制终止所有Nginx进程..."
+        echo $NGINX_PIDS | xargs kill -9 2>/dev/null || true
+    fi
+    
+    # 确保没有进程占用前端端口
+    log "确保端口$FRONTEND_PORT没有被占用..."
+    PROCESS_USING_PORT=$(lsof -t -i:$FRONTEND_PORT 2>/dev/null || echo "")
+    if [ ! -z "$PROCESS_USING_PORT" ]; then
+        log "终止占用端口$FRONTEND_PORT的进程: $PROCESS_USING_PORT"
+        echo $PROCESS_USING_PORT | xargs kill -9 2>/dev/null || true
+    fi
+    
+    # 等待所有进程完全终止
+    sleep 2
+    
+    # 最终检查
+    if lsof -i:$BACKEND_PORT -P -n &> /dev/null || lsof -i:$FRONTEND_PORT -P -n &> /dev/null; then
+        warn "某些端口仍被占用，可能需要手动干预"
+    else
+        success "所有服务已停止，端口已释放"
+    fi
 }
 
 # 检查命令是否存在
@@ -117,27 +424,6 @@ check_command() {
         return 1
     else
         success "$1 已安装"
-        return 0
-    fi
-}
-
-# 检查端口是否被占用
-check_port() {
-    if lsof -i:$1 &> /dev/null; then
-        warn "端口 $1 已被占用，尝试关闭占用进程..."
-        # 尝试终止占用该端口的进程
-        lsof -t -i:$1 | xargs kill -9 || true
-        sleep 2
-        if lsof -i:$1 &> /dev/null; then
-            error "无法释放端口 $1，请手动终止占用进程"
-            echo -e "  占用进程: $(lsof -i:$1 | tail -n +2)" | tee -a $LOG_FILE
-            return 1
-        else
-            success "端口 $1 已释放"
-            return 0
-        fi
-    else
-        success "端口 $1 可用"
         return 0
     fi
 }
@@ -171,8 +457,8 @@ check_system_env() {
     check_command "git" "sudo apt update && sudo apt install -y git"
     
     # 检查端口占用情况
-    check_port $BACKEND_PORT
-    check_port $FRONTEND_PORT
+    check_and_free_port $BACKEND_PORT "backend" false
+    check_and_free_port $FRONTEND_PORT "nginx" false
 }
 
 # 设置后端环境
@@ -210,7 +496,7 @@ setup_backend() {
     if [ -f "$PROJECT_ROOT/.env" ]; then
         log "找到.env文件，更新数据库配置..."
         # 备份原有.env文件
-        cp "$PROJECT_ROOT/.env" "$PROJECT_ROOT/.env.backup"
+        cp "$PROJECT_ROOT/.env" "$CONFIG_BACKUP_DIR/.env.backup"
         
         # 更新数据库连接 URL
         sed -i "s|DATABASE_URL=.*|DATABASE_URL=postgresql://$DB_USER:$DB_PASS@$DB_HOST:$DB_PORT/$DB_NAME|g" "$PROJECT_ROOT/.env"
@@ -228,14 +514,13 @@ setup_backend() {
             success "已生成新的安全密钥"
             warn "注意：更新密钥会导致所有现有用户会话和JWT令牌失效"
         else
-            # 如果密钥是默认值，无论如何都要更新
+            # 确保SECRET_KEY已设置
             if grep -q "your-super-secret-key" "$PROJECT_ROOT/.env"; then
-                log "检测到默认密钥，更新为安全密钥..."
                 NEW_SECRET_KEY=$(openssl rand -hex 32)
                 NEW_JWT_KEY=$(openssl rand -hex 32)
                 sed -i "s|SECRET_KEY=.*|SECRET_KEY=$NEW_SECRET_KEY|g" "$PROJECT_ROOT/.env"
                 sed -i "s|JWT_SECRET_KEY=.*|JWT_SECRET_KEY=$NEW_JWT_KEY|g" "$PROJECT_ROOT/.env"
-                success "已生成新的安全密钥"
+                log "生成了新的安全密钥"
             else
                 log "保留现有安全密钥"
             fi
@@ -276,8 +561,8 @@ setup_nginx() {
     log "===== 配置Nginx ====="
     
     # 检查Nginx配置文件
-    if [ ! -f "$FRONTEND_DIR/nginx.softlink.conf" ]; then
-        error "未找到Nginx配置文件: $FRONTEND_DIR/nginx.softlink.conf"
+    if [ ! -f "$NGINX_CONF" ]; then
+        error "未找到Nginx配置文件: $NGINX_CONF"
         return 1
     fi
     
@@ -353,7 +638,7 @@ EOL
     
     # 测试配置
     log "测试Nginx配置..."
-    sudo nginx -t
+    sudo nginx -t -c "$NGINX_CONF"
     if [ $? -ne 0 ]; then
         error "Nginx配置测试失败"
         return 1
@@ -603,81 +888,204 @@ EOF
     success "已创建停止脚本: $PROJECT_ROOT/stop_softlink.sh"
 }
 
-# 显示使用帮助
+# 显示帮助信息
 show_help() {
-    echo "SoftLink项目部署脚本"
-    echo "用法: ./deploy_softlink.sh [选项]"
-    echo ""
-    echo "选项:"
-    echo "  --update-keys    更新安全密钥（会使现有会话失效）"
-    echo ""
-    echo "示例:"
-    echo "  ./deploy_softlink.sh              # 正常部署，保留现有密钥"
-    echo "  ./deploy_softlink.sh --update-keys # 部署并更新安全密钥"
+    cat << EOF
+SoftLink项目部署脚本
+用法: ./deploy_softlink.sh [选项]
+
+选项:
+  --help          显示此帮助信息
+  --update-keys   更新安全密钥（会使现有会话失效）
+  --no-root      不使用root权限运行（不推荐）
+  --force        强制模式，不询问确认
+
+示例:
+  ./deploy_softlink.sh              # 正常部署，保留现有密钥
+  ./deploy_softlink.sh --update-keys # 部署并更新安全密钥
+  ./deploy_softlink.sh --force      # 强制部署，自动停止冲突服务
+
+注意:
+  1. 建议在部署前备份重要数据
+  2. 部署日志将保存在 $LOG_DIR 目录
+  3. 如遇问题，请查看错误日志: $ERROR_LOG
+EOF
+}
+
+# 备份现有配置文件
+backup_configs() {
+    log "===== 备份配置文件 ====="
+    
+    # 备份.env文件
+    if [ -f "$ENV_FILE" ]; then
+        cp "$ENV_FILE" "$CONFIG_BACKUP_DIR/.env.backup"
+        success "已备份.env文件"
+    fi
+    
+    # 备份Nginx配置
+    if [ -f "$NGINX_CONF" ]; then
+        cp "$NGINX_CONF" "$CONFIG_BACKUP_DIR/nginx.softlink.conf.backup"
+        success "已备份Nginx配置文件"
+    fi
+    
+    # 备份数据库配置（如果存在）
+    if [ -f "$BACKEND_DIR/config.py" ]; then
+        cp "$BACKEND_DIR/config.py" "$CONFIG_BACKUP_DIR/config.py.backup"
+        success "已备份数据库配置文件"
+    fi
+    
+    # 创建备份信息文件
+    cat > "$BACKUP_DIR/backup_info.txt" << EOL
+备份时间: $(date '+%Y-%m-%d %H:%M:%S')
+服务器IP: $SERVER_IP
+后端端口: $BACKEND_PORT
+前端端口: $FRONTEND_PORT
+数据库配置:
+  主机: $DB_HOST
+  端口: $DB_PORT
+  数据库: $DB_NAME
+  用户: $DB_USER
+EOL
+    
+    success "配置文件备份完成，备份目录: $BACKUP_DIR"
+}
+
+# 验证配置文件
+validate_configs() {
+    log "===== 验证配置文件 ====="
+    local has_error=false
+    
+    # 验证.env文件
+    if [ -f "$ENV_FILE" ]; then
+        if ! grep -q "^SECRET_KEY=" "$ENV_FILE" || ! grep -q "^JWT_SECRET_KEY=" "$ENV_FILE"; then
+            error ".env文件缺少必要的密钥配置"
+            has_error=true
+        fi
+    else
+        warn "未找到.env文件，将在部署时创建"
+    fi
+    
+    # 验证Nginx配置
+    if [ -f "$NGINX_CONF" ]; then
+        if ! nginx -t -c "$NGINX_CONF" &>/dev/null; then
+            error "Nginx配置文件验证失败"
+            has_error=true
+        fi
+    else
+        warn "未找到Nginx配置文件，将在部署时创建"
+    fi
+    
+    # 验证数据库连接
+    log "验证数据库连接..."
+    if command -v pg_isready &>/dev/null; then
+        if ! pg_isready -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" &>/dev/null; then
+            error "无法连接到数据库服务器"
+            has_error=true
+        fi
+    else
+        warn "未安装pg_isready工具，跳过数据库连接验证"
+    fi
+    
+    if [ "$has_error" = true ]; then
+        error "配置验证失败，请修复上述错误后重试"
+        return 1
+    fi
+    
+    success "配置验证完成"
+    return 0
 }
 
 # 主函数
 main() {
+    # 初始化日志系统
+    init_logging
+    
     # 显示脚本参数信息
     log "开始部署SoftLink项目..."
     if [ "$UPDATE_SECURITY_KEYS" = true ]; then
         log "参数: 将更新安全密钥"
     fi
     
-    # 首先停止已运行的服务
-    stop_services
+    # 创建备份
+    backup_configs
+    
+    # 验证配置文件
+    validate_configs || {
+        error "配置验证失败"
+        return 1
+    }
+    
+    # 检查服务状态并处理端口占用问题
+    check_service_status || {
+        error "服务状态检查失败"
+        return 1
+    }
     
     # 检查系统环境
-    check_system_env
+    check_system_env || {
+        error "系统环境检查失败"
+        return 1
+    }
     
     # 设置后端环境
-    setup_backend
-    if [ $? -ne 0 ]; then
-        error "后端环境设置失败，部署中止"
-        exit 1
-    fi
-    
-    # 检查防火墙配置
-    check_firewall
+    setup_backend || {
+        error "后端环境设置失败"
+        return 1
+    }
     
     # 配置Nginx
-    setup_nginx
-    if [ $? -ne 0 ]; then
-        error "Nginx配置失败，部署中止"
-        exit 1
-    fi
+    setup_nginx || {
+        error "Nginx配置失败"
+        return 1
+    }
     
     # 启动后端服务
-    start_backend
-    if [ $? -ne 0 ]; then
-        error "后端服务启动失败，部署中止"
-        exit 1
-    fi
+    start_backend || {
+        error "后端服务启动失败"
+        return 1
+    }
     
     # 启动前端服务
-    start_frontend
-    if [ $? -ne 0 ]; then
-        error "前端服务启动失败，部署中止"
-        exit 1
-    fi
+    start_frontend || {
+        error "前端服务启动失败"
+        stop_services
+        return 1
+    }
+    
+    # 检查防火墙配置
+    check_firewall || {
+        warn "防火墙配置可能存在问题，请手动检查"
+    }
+    
+    # 执行健康检查
+    health_check || {
+        warn "健康检查发现潜在问题，请查看日志了解详情"
+    }
     
     # 创建停止脚本
-    create_stop_script
-    
-    # 健康检查
-    health_check
+    create_stop_script || {
+        warn "停止脚本创建失败，请手动管理服务"
+    }
     
     # 显示系统信息
     show_system_info
     
-    log "SoftLink项目部署完成"
+    # 清理临时文件
+    cleanup
+    
+    success "SoftLink项目部署完成"
+    log "详细部署日志请查看: $LOG_FILE"
+    return 0
 }
 
-# 如果带--help参数，显示帮助
-if [[ "$1" == "--help" ]]; then
-    show_help
-    exit 0
-fi
-
-# 执行主函数
-main 
+# 解析命令行参数并执行主函数
+case "$1" in
+    --help)
+        show_help
+        exit 0
+        ;;
+    *)
+        main "$@"
+        exit $?
+        ;;
+esac 
