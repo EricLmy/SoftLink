@@ -34,11 +34,11 @@ def parse_args():
 def print_status(message, status='info'):
     """打印带有颜色的状态信息"""
     prefix = {
-        'success': f"{GREEN}[✓]{END} ",
-        'warning': f"{YELLOW}[!]{END} ",
-        'error': f"{RED}[✗]{END} ",
-        'info': f"{BOLD}[*]{END} "
-    }.get(status, f"{BOLD}[*]{END} ")
+        'success': GREEN + "[✓]" + END + " ",
+        'warning': YELLOW + "[!]" + END + " ",
+        'error': RED + "[✗]" + END + " ",
+        'info': BOLD + "[*]" + END + " "
+    }.get(status, BOLD + "[*]" + END + " ")
     
     print(f"{prefix}{message}")
 
