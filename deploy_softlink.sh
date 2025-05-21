@@ -194,10 +194,25 @@ while [[ $# -gt 0 ]]; do
       FORCE_MODE=true
       shift
       ;;
+    --port)
+      if [[ $2 =~ ^[0-9]+$ ]] && [ $2 -gt 1024 ] && [ $2 -lt 65535 ]; then
+        BACKEND_PORT=$2
+        log "使用自定义后端端口: $BACKEND_PORT"
+      else
+        error "无效的端口号: $2，必须是1024-65535之间的数字"
+        exit 1
+      fi
+      shift 2
+      ;;
+    --help)
+      show_help
+      exit 0
+      ;;
     *)
       # 未知参数
       echo "未知参数: $1"
-      echo "可用参数: --update-keys (更新安全密钥), --no-root (不使用root权限), --force (强制模式)"
+      echo "可用参数: --update-keys (更新安全密钥), --no-root (不使用root权限), --force (强制模式), --port <端口号> (指定后端端口)"
+      echo "使用 --help 查看完整帮助"
       shift
       ;;
   esac
@@ -220,15 +235,26 @@ check_and_free_port() {
         local PID=$(echo "$PID_INFO" | awk '{print $2}')
         local PROCESS_NAME=$(echo "$PID_INFO" | awk '{print $1}')
         local PROCESS_USER=$(ps -o user= -p $PID)
+        local PROCESS_CMD=$(ps -o cmd= -p $PID | head -c 50)
         
         warn "端口 $PORT 被进程 $PROCESS_NAME (PID: $PID, 用户: $PROCESS_USER) 占用"
+        warn "进程命令: $PROCESS_CMD"
         
-        # 检查是否是我们自己的服务
+        # 检查是否是特定类型的进程
         local IS_OUR_SERVICE=false
+        local IS_SYSTEM_SERVICE=false
+        
         if [[ "$PROCESS_NAME" == *"python"* ]] && [[ "$SERVICE_NAME" == "backend" ]]; then
             IS_OUR_SERVICE=true
         elif [[ "$PROCESS_NAME" == *"nginx"* ]] && [[ "$SERVICE_NAME" == "nginx" ]]; then
             IS_OUR_SERVICE=true
+        fi
+        
+        # 检查是否是系统服务或其他重要服务
+        if [[ "$PROCESS_NAME" == *"commplex-main"* ]] || 
+           [[ "$PROCESS_CMD" == *"commplex-main"* ]]; then
+            IS_SYSTEM_SERVICE=true
+            warn "检测到可能是系统服务 (commplex-main)"
         fi
         
         # 如果不是强制模式且不是我们的服务，询问用户
@@ -238,12 +264,51 @@ check_and_free_port() {
             echo "  名称：$PROCESS_NAME"
             echo "  PID：$PID"
             echo "  用户：$PROCESS_USER"
-            read -p "是否终止该进程？(y/n): " -n 1 -r
-            echo
-            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                error "用户取消操作"
-                return 1
+            echo "  命令：$PROCESS_CMD"
+            
+            if [ "$IS_SYSTEM_SERVICE" = true ]; then
+                echo -e "${RED}警告：这可能是系统服务或其他重要服务！${NC}"
+                echo "建议选项："
+                echo "  1. 更改SoftLink后端使用的端口"
+                echo "  2. 如果确认可以安全终止该服务，再选择终止"
             fi
+            
+            echo "请选择操作："
+            echo "  [t] 尝试终止该进程"
+            echo "  [c] 更改SoftLink使用的端口"
+            echo "  [s] 跳过并退出部署"
+            read -p "您的选择 [t/c/s]: " -n 1 -r PORT_ACTION
+            echo
+            
+            case $PORT_ACTION in
+                [Tt]* )
+                    log "尝试终止进程 $PID..."
+                    ;;
+                [Cc]* )
+                    read -p "请输入新的后端端口号: " NEW_PORT
+                    if [[ $NEW_PORT =~ ^[0-9]+$ ]] && [ $NEW_PORT -gt 1024 ] && [ $NEW_PORT -lt 65535 ]; then
+                        log "将后端端口从 $BACKEND_PORT 更改为 $NEW_PORT"
+                        BACKEND_PORT=$NEW_PORT
+                        # 更新.env文件中的端口配置
+                        if [ -f "$ENV_FILE" ]; then
+                            sed -i "s|FLASK_RUN_PORT=.*|FLASK_RUN_PORT=$NEW_PORT|g" "$ENV_FILE" || true
+                        fi
+                        return 0
+                    else
+                        error "无效的端口号，必须是1024-65535之间的数字"
+                        return 1
+                    fi
+                    ;;
+                * )
+                    log "用户选择退出部署"
+                    exit 0
+                    ;;
+            esac
+        fi
+        
+        # 如果是系统服务且处于强制模式，给出额外警告
+        if [ "$IS_SYSTEM_SERVICE" = true ] && [ "$FORCE" = true ]; then
+            warn "正在强制模式下终止可能的系统服务，这可能导致系统不稳定！"
         fi
         
         # 尝试优雅终止进程
@@ -267,7 +332,32 @@ check_and_free_port() {
         # 最终检查
         if lsof -i:$PORT -P -n &> /dev/null; then
             error "无法释放端口 $PORT，请手动检查并终止占用进程"
-            return 1
+            error "或者考虑更改SoftLink使用的端口"
+            
+            # 提供更改端口的选项
+            if [ "$FORCE" != "true" ]; then
+                read -p "是否更改SoftLink使用的端口? (y/n): " -n 1 -r
+                echo
+                if [[ $REPLY =~ ^[Yy]$ ]]; then
+                    read -p "请输入新的后端端口号: " NEW_PORT
+                    if [[ $NEW_PORT =~ ^[0-9]+$ ]] && [ $NEW_PORT -gt 1024 ] && [ $NEW_PORT -lt 65535 ]; then
+                        log "将后端端口从 $BACKEND_PORT 更改为 $NEW_PORT"
+                        BACKEND_PORT=$NEW_PORT
+                        # 更新.env文件中的端口配置
+                        if [ -f "$ENV_FILE" ]; then
+                            sed -i "s|FLASK_RUN_PORT=.*|FLASK_RUN_PORT=$NEW_PORT|g" "$ENV_FILE" || true
+                        fi
+                        return 0
+                    else
+                        error "无效的端口号，必须是1024-65535之间的数字"
+                        return 1
+                    fi
+                else
+                    return 1
+                fi
+            else
+                return 1
+            fi
         else
             success "端口 $PORT 已成功释放"
         fi
@@ -634,11 +724,19 @@ EOL
         return 1
     fi
     
-    sudo cp -f "$FRONTEND_DIR/nginx.temp.conf" "$NGINX_CONF_DIR/nginx.conf"
+    log "将Nginx配置写入 $NGINX_CONF_DIR/conf.d/softlink.conf"
+    sudo mkdir -p "$NGINX_CONF_DIR/conf.d"
+    sudo cp -f "$FRONTEND_DIR/nginx.temp.conf" "$NGINX_CONF_DIR/conf.d/softlink.conf"
+    
+    # 确保主配置文件包含conf.d目录
+    if ! grep -q "include.*conf.d" "$NGINX_CONF_DIR/nginx.conf"; then
+        log "更新主Nginx配置文件以包含conf.d目录..."
+        sudo sed -i '/http {/a \    include /etc/nginx/conf.d/*.conf;' "$NGINX_CONF_DIR/nginx.conf"
+    fi
     
     # 测试配置
     log "测试Nginx配置..."
-    sudo nginx -t -c "$NGINX_CONF"
+    sudo nginx -t
     if [ $? -ne 0 ]; then
         error "Nginx配置测试失败"
         return 1
@@ -663,9 +761,12 @@ start_backend() {
     # 激活虚拟环境
     source venv/bin/activate
     
+    # 确保环境变量中包含端口设置
+    export FLASK_RUN_PORT=$BACKEND_PORT
+    
     # 启动后端服务
-    log "启动后端服务..."
-    nohup python startup.py > $BACKEND_DIR/backend.log 2>&1 &
+    log "启动后端服务在端口 $BACKEND_PORT..."
+    nohup python startup.py --port $BACKEND_PORT > $BACKEND_DIR/backend.log 2>&1 &
     BACKEND_PID=$!
     
     # 检查服务是否成功启动
@@ -897,18 +998,28 @@ SoftLink项目部署脚本
 选项:
   --help          显示此帮助信息
   --update-keys   更新安全密钥（会使现有会话失效）
-  --no-root      不使用root权限运行（不推荐）
-  --force        强制模式，不询问确认
+  --no-root       不使用root权限运行（不推荐）
+  --force         强制模式，不询问确认
+  --port <端口>   指定后端服务端口（默认: 5000）
 
 示例:
   ./deploy_softlink.sh              # 正常部署，保留现有密钥
   ./deploy_softlink.sh --update-keys # 部署并更新安全密钥
   ./deploy_softlink.sh --force      # 强制部署，自动停止冲突服务
+  ./deploy_softlink.sh --port 5001  # 指定后端端口为5001
 
 注意:
   1. 建议在部署前备份重要数据
   2. 部署日志将保存在 $LOG_DIR 目录
   3. 如遇问题，请查看错误日志: $ERROR_LOG
+  4. 如果默认端口5000被占用，可以使用--port选项指定其他端口
+
+端口冲突处理:
+  - 如果检测到端口冲突，脚本会提供以下选项:
+    a) 终止占用端口的进程（谨慎使用）
+    b) 更改SoftLink使用的端口
+    c) 退出部署
+  - 对于系统服务，建议更改SoftLink使用的端口而非终止服务
 EOF
 }
 
