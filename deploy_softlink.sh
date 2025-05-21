@@ -3,6 +3,9 @@
 # SoftLink项目一键部署脚本
 # 用于在腾讯云服务器上快速部署整个项目环境
 
+# 初始化变量
+FORCE_MODE=false
+
 # 确保脚本以正确的权限运行
 if [ "$(id -u)" != "0" ] && [ "$1" != "--no-root" ]; then
     echo "此脚本需要root权限运行。"
@@ -45,6 +48,10 @@ FRONTEND_DIR="$PROJECT_ROOT/frontend"
 # 注意：前端构建目录是softlin-f而不是softlink-f
 FRONTEND_BUILD_DIR="$FRONTEND_DIR/softlin-f"
 LOG_DIR="$PROJECT_ROOT/logs"
+
+# 确保日志目录存在
+mkdir -p "$LOG_DIR"
+
 LOG_FILE="$LOG_DIR/deploy_$(date +%Y%m%d_%H%M%S).log"
 ERROR_LOG="$LOG_DIR/error.log"
 CURRENT_LOG_LINK="$LOG_DIR/current.log"
