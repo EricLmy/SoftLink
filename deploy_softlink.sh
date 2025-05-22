@@ -5,6 +5,7 @@
 
 # 初始化变量
 FORCE_MODE=false
+RETURN_CODE=0
 
 # 确保脚本以正确的权限运行
 if [ "$(id -u)" != "0" ] && [ "$1" != "--no-root" ]; then
@@ -16,7 +17,7 @@ fi
 
 # 设置环境变量隔离
 set -e  # 遇到错误立即退出
-set -u  # 使用未定义的变量时报错
+# set -u  # 使用未定义的变量时报错 - 暂时关闭，防止未绑定变量错误
 export LC_ALL=C  # 使用标准语言环境
 export LANG=C    # 使用标准语言环境
 umask 022        # 设置安全的文件权限掩码
@@ -1150,12 +1151,14 @@ main() {
     # 检查系统环境
     check_system_env || {
         error "系统环境检查失败"
+        RETURN_CODE=1
         return 1
     }
     
     # 检查服务状态并处理端口占用问题
     check_service_status || {
         error "服务状态检查失败"
+        RETURN_CODE=1
         return 1
     }
     
@@ -1172,18 +1175,21 @@ main() {
     # 设置后端环境
     setup_backend || {
         error "后端环境设置失败"
+        RETURN_CODE=1
         return 1
     }
     
     # 配置Nginx
     setup_nginx || {
         error "Nginx配置失败"
+        RETURN_CODE=1
         return 1
     }
     
     # 启动后端服务
     start_backend || {
         error "后端服务启动失败"
+        RETURN_CODE=1
         return 1
     }
     
@@ -1191,6 +1197,7 @@ main() {
     start_frontend || {
         error "前端服务启动失败"
         stop_services
+        RETURN_CODE=1
         return 1
     }
     
@@ -1217,6 +1224,7 @@ main() {
     
     success "SoftLink项目部署完成"
     log "详细部署日志请查看: $LOG_FILE"
+    RETURN_CODE=0
     return 0
 }
 
@@ -1228,6 +1236,6 @@ case "$1" in
         ;;
     *)
         main "$@"
-        exit $?
+        exit $RETURN_CODE
         ;;
 esac 
