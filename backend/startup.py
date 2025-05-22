@@ -40,62 +40,47 @@ def print_status(message, status='info'):
         'info': BOLD + "[*]" + END + " "
     }.get(status, BOLD + "[*]" + END + " ")
     
-    print(f"{prefix}{message}")
+    print("{}{}".format(prefix, message))
 
 def check_python_version():
-    """检查Python版本"""
-    print_status("检查Python版本...", 'info')
-    major, minor = sys.version_info[:2]
+    """检查Python版本是否满足要求"""
+    major, minor = sys.version_info.major, sys.version_info.minor
     if major < 3 or (major == 3 and minor < 6):
-        print_status(f"Python版本过低: {major}.{minor}，需要3.6或更高版本", 'error')
+        print_status("Python版本过低: {}.{}，需要3.6或更高版本".format(major, minor), 'error')
         return False
-    
-    print_status(f"Python版本 {major}.{minor} 符合要求", 'success')
-    return True
+    else:
+        print_status("Python版本 {}.{} 符合要求".format(major, minor), 'success')
+        return True
 
 def check_dependencies():
-    """检查所需的Python依赖是否已安装"""
-    print_status("检查必要的Python依赖...", 'info')
-    required_packages = [
-        'flask', 'sqlalchemy', 'marshmallow', 'flask_sqlalchemy', 
-        'flask_jwt_extended', 'werkzeug', 'redis'
-    ]
-    
-    all_installed = True
-    for package in required_packages:
+    """检查必要依赖是否已安装"""
+    packages = ['flask', 'sqlalchemy', 'psycopg2', 'dotenv', 'werkzeug']
+    for package in packages:
         try:
             importlib.import_module(package)
-            print_status(f"依赖 {package} 已安装", 'success')
+            print_status("依赖 {} 已安装".format(package), 'success')
         except ImportError:
-            print_status(f"缺少依赖: {package}", 'error')
-            all_installed = False
-    
-    return all_installed
+            print_status("缺少依赖: {}".format(package), 'error')
+            return False
+    return True
 
 def check_config_files():
     """检查必要的配置文件是否存在"""
-    print_status("检查配置文件...", 'info')
-    # 检查项目结构中可能的配置文件位置
-    possible_config_files = [
-        os.path.join('app', 'config.py'),
-        os.path.join('instance', 'config.py'),
-        os.path.join('config.py')
-    ]
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    config_file = os.path.join(current_dir, '.env')
     
-    # 至少有一个配置文件存在即可
-    any_exists = False
-    for config_file in possible_config_files:
+    if os.path.exists(config_file):
+        print_status("配置文件 {} 存在".format(config_file), 'success')
+        return True
+    else:
+        print_status("配置文件 {} 不存在，将尝试其他位置".format(config_file), 'info')
+        
+        # 检查上层目录
+        parent_dir = os.path.dirname(current_dir)
+        config_file = os.path.join(parent_dir, '.env')
         if os.path.exists(config_file):
-            print_status(f"配置文件 {config_file} 存在", 'success')
-            any_exists = True
-        else:
-            print_status(f"配置文件 {config_file} 不存在，将尝试其他位置", 'info')
-    
-    if not any_exists:
-        print_status("未找到任何配置文件，可能使用了环境变量或默认配置", 'warning')
-    
-    # 对于Flask应用，配置可能在环境变量中或使用默认值，因此不一定要求配置文件存在
-    return True
+            return True
+        return False
 
 @contextmanager
 def database_context():
@@ -112,188 +97,243 @@ def database_context():
 
 def check_database_connection():
     """检查数据库连接"""
-    print_status("检查数据库连接...", 'info')
-    with database_context() as db:
-        if db is None:
-            return False
-        
-        try:
-            # 使用合适的查询方法验证连接
-            from sqlalchemy import text
-            db.session.execute(text("SELECT 1"))
-            print_status("数据库连接成功", 'success')
-            return True
-        except Exception as e:
-            print_status(f"数据库连接失败: {str(e)}", 'error')
-            # 数据库问题通常不会阻止应用启动，SQLite会在需要时创建数据库
-            print_status("数据库可能不存在，但服务可以启动并创建它", 'warning')
-            return True
-
-def check_database_tables():
-    """检查数据库表是否已创建"""
-    print_status("检查数据库表结构...", 'info')
-    with database_context() as db:
-        if db is None:
-            return False
-        
-        try:
-            # 获取所有表格名称
-            from app.models import User, VIPLevel, Feedback, Feature
-            required_tables = [
-                User.__tablename__, 
-                VIPLevel.__tablename__, 
-                Feedback.__tablename__, 
-                Feature.__tablename__
-            ]
-            
-            inspector = db.inspect(db.engine)
-            existing_tables = inspector.get_table_names()
-            
-            all_exist = True
-            for table in required_tables:
-                if table in existing_tables:
-                    print_status(f"表 {table} 已存在", 'success')
-                else:
-                    print_status(f"表 {table} 不存在", 'error')
-                    all_exist = False
-            
-            return all_exist
-        except Exception as e:
-            print_status(f"检查数据库表时出错: {str(e)}", 'error')
-            return False
-
-def check_port_available(port=5000):
-    """检查端口是否可用"""
-    print_status(f"检查端口 {port} 是否可用...", 'info')
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        s.bind(('127.0.0.1', port))
-        s.close()
-        print_status(f"端口 {port} 可用", 'success')
+        # 假设app已经导入
+        from app import create_app
+        app = create_app()
+        
+        with app.app_context():
+            from app.models import db
+            # 执行一个简单的查询以验证连接
+            db.engine.execute("SELECT 1")
+            return True
+    except Exception as e:
+        print_status("创建应用上下文时出错: {}".format(str(e)), 'error')
+        return False
+
+def check_database_structure():
+    """检查数据库表结构"""
+    try:
+        from app import create_app
+        app = create_app()
+        
+        with app.app_context():
+            from app.models import db
+            # 连接到数据库
+            conn = db.engine.connect()
+            
+            # 测试连接是否有效
+            try:
+                conn.execute("SELECT 1")
+            except Exception as e:
+                print_status("数据库连接失败: {}".format(str(e)), 'error')
+                return False
+                
+            # 列出所有要检查的表名
+            required_tables = ['users', 'roles', 'feedbacks', 'categories']
+            
+            # 检查表是否存在
+            for table in required_tables:
+                # 这里使用SQL来检查表是否存在
+                query = """
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = '{}'
+                );
+                """.format(table)
+                
+                result = conn.execute(query).scalar()
+                
+                if result:
+                    print_status("表 {} 已存在".format(table), 'success')
+                else:
+                    print_status("表 {} 不存在".format(table), 'error')
+                    return False
+            
+            return True
+    except Exception as e:
+        print_status("检查数据库表时出错: {}".format(str(e)), 'error')
+        return False
+
+def check_port_available(port):
+    """检查端口是否可用"""
+    print_status("检查端口 {} 是否可用...".format(port), 'info')
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(('localhost', port))
+        sock.close()
+        print_status("端口 {} 可用".format(port), 'success')
         return True
     except socket.error:
-        print_status(f"端口 {port} 已被占用", 'error')
-        return False
+        sock.close()
+        print_status("端口 {} 已被占用".format(port), 'error')
+        # 自动查找可用端口
+        return suggest_available_port()
 
-def create_tables_if_needed():
-    """如果表不存在，则创建数据库表"""
-    print_status("尝试创建数据库表...", 'info')
-    try:
-        from app import create_app, db
-        app = create_app()
-        with app.app_context():
-            db.create_all()
-            print_status("数据库表创建或验证成功", 'success')
-            return True
-    except Exception as e:
-        print_status(f"创建数据库表时出错: {str(e)}", 'error')
-        return False
-
-def create_initial_user():
-    """创建初始超级管理员用户（如果不存在）"""
-    print_status("检查是否需要创建初始用户...", 'info')
-    try:
-        from app import create_app, db
-        from app.models import User
-        
-        app = create_app()
-        with app.app_context():
-            # 检查是否有超级管理员用户
-            super_admin = User.query.filter_by(role='super_admin').first()
-            if super_admin:
-                print_status("已存在超级管理员用户，无需创建初始用户", 'success')
-                return True
-            
-            # 尝试运行创建初始用户的脚本
-            if os.path.exists('create_initial_users.py'):
-                print_status("运行初始用户创建脚本...", 'info')
-                subprocess.run([sys.executable, 'create_initial_users.py'], check=True)
-                print_status("初始用户创建成功", 'success')
-                return True
-            else:
-                print_status("找不到初始用户创建脚本，请手动创建超级管理员用户", 'warning')
-                return True
-    except Exception as e:
-        print_status(f"检查/创建初始用户时出错: {str(e)}", 'error')
-        return False
-
-def start_backend_service(port=5000):
-    """启动后端服务"""
-    print_status(f"准备启动后端服务在端口 {port}...", 'info')
-    
-    # 设置环境变量
-    os.environ['FLASK_RUN_PORT'] = str(port)
-    
-    if os.path.exists('run.py'):
-        print_status(f"正在启动后端服务在端口 {port}...", 'info')
+def suggest_available_port():
+    """建议一个可用的端口"""
+    print_status("尝试查找可用端口...", 'info')
+    for test_port in range(5000, 5100):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            # 使用subprocess启动，并传递端口参数
-            cmd = [sys.executable, 'run.py']
-            env = os.environ.copy()
-            env['FLASK_RUN_PORT'] = str(port)
-            subprocess.run(cmd, env=env, check=True)
-            return True
-        except subprocess.CalledProcessError as e:
-            print_status(f"启动后端服务时出错: {str(e)}", 'error')
-            return False
-    else:
-        print_status("找不到运行脚本 run.py", 'error')
+            sock.bind(('localhost', test_port))
+            sock.close()
+            print_status("找到可用端口: {}".format(test_port), 'success')
+            response = input("是否使用端口 {}? (y/n): ".format(test_port))
+            if response.lower() == 'y':
+                return test_port
+        except socket.error:
+            sock.close()
+            continue
+    
+    print_status("在端口范围5000-5099中找不到可用端口", 'error')
+    response = input("是否尝试使用更高端口号? (y/n): ")
+    if response.lower() == 'y':
+        # 尝试更高的端口范围
+        for test_port in range(8000, 8100):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                sock.bind(('localhost', test_port))
+                sock.close()
+                print_status("找到可用端口: {}".format(test_port), 'success')
+                response = input("是否使用端口 {}? (y/n): ".format(test_port))
+                if response.lower() == 'y':
+                    return test_port
+            except socket.error:
+                sock.close()
+                continue
+    
+    return False
+
+def create_database_tables():
+    """创建数据库表"""
+    try:
+        from app import create_app
+        app = create_app()
+        
+        with app.app_context():
+            from app.models import db
+            # 创建所有表
+            db.create_all()
+        return True
+    except Exception as e:
+        print_status("创建数据库表时出错: {}".format(str(e)), 'error')
+        return False
+
+def create_initial_users():
+    """创建初始管理员用户"""
+    try:
+        from app import create_app
+        app = create_app()
+        
+        with app.app_context():
+            # 导入User和Role模型
+            from app.models import User, Role, db
+            
+            # 检查角色是否存在，不存在则创建
+            admin_role = Role.query.filter_by(name='admin').first()
+            if not admin_role:
+                admin_role = Role(name='admin', description='Administrator')
+                db.session.add(admin_role)
+                db.session.commit()
+            
+            # 创建管理员用户（如果不存在）
+            admin = User.query.filter_by(username='admin').first()
+            if not admin:
+                admin = User(
+                    username='admin',
+                    email='admin@example.com',
+                    role=admin_role
+                )
+                admin.set_password('admin')  # 设置默认密码
+                db.session.add(admin)
+                db.session.commit()
+            
+        return True
+    except Exception as e:
+        print_status("检查/创建初始用户时出错: {}".format(str(e)), 'error')
+        return False
+
+def start_backend(port):
+    """启动后端服务"""
+    print_status("准备启动后端服务在端口 {}...".format(port), 'info')
+    
+    try:
+        # 使用flask run命令启动服务
+        os.environ['FLASK_APP'] = 'run.py'
+        os.environ['FLASK_RUN_PORT'] = str(port)
+        
+        print_status("正在启动后端服务在端口 {}...".format(port), 'info')
+        
+        # 使用subprocess启动Flask应用
+        subprocess.Popen(
+            ['python', '-m', 'flask', 'run', '--host=0.0.0.0', '--port={}'.format(port)],
+            cwd=os.path.dirname(os.path.abspath(__file__))  # 确保在正确的目录下执行
+        )
+        
+        return True
+    except Exception as e:
+        print_status("启动后端服务时出错: {}".format(str(e)), 'error')
         return False
 
 def main():
-    """主函数：按顺序执行所有检查，然后启动服务"""
+    """主函数：执行所有检查并启动服务"""
     # 解析命令行参数
     args = parse_args()
     port = args.port
     
-    print_status(f"{BOLD}开始 SoftLink 后端服务启动流程{END}", 'info')
-    print_status(f"将使用端口: {port}", 'info')
+    # 显示启动信息
+    print_status("{}开始 SoftLink 后端服务启动流程{}".format(BOLD, END), 'info')
+    print_status("将使用端口: {}".format(port), 'info')
     
-    # 更改工作目录到脚本所在目录
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    os.chdir(script_dir)
-    
-    # 执行检查
+    # 检查项及其描述
     checks = [
-        ("Python版本检查", check_python_version),
-        ("依赖检查", check_dependencies),
-        ("配置文件检查", check_config_files),
-        ("数据库连接检查", check_database_connection),
-        ("端口可用性检查", lambda: check_port_available(port)),
-        ("数据库表检查", check_database_tables)
+        (check_python_version, "Python版本检查"),
+        (check_dependencies, "依赖检查"),
+        (check_config_files, "配置文件检查"),
+        (check_database_connection, "数据库连接检查"),
+        (check_database_structure, "数据库结构检查")
     ]
     
-    all_passed = True
-    for check_name, check_func in checks:
-        print_status(f"执行{check_name}...", 'info')
-        passed = check_func()
-        if not passed:
-            all_passed = False
-            print_status(f"{check_name}失败", 'error')
-            
-            # 对某些检查失败提供修复选项
-            if check_name == "数据库表检查":
-                fix = input("是否尝试创建数据库表? (y/n): ")
-                if fix.lower() == 'y':
-                    if create_tables_if_needed():
-                        all_passed = True  # 继续启动
-                    else:
-                        continue  # 保持失败状态
-            # 即使数据库表检查失败，也询问是否继续
-            if check_name == "数据库表检查":
-                continue_anyway = input("是否仍然启动服务? (y/n): ")
-                if continue_anyway.lower() == 'y':
-                    all_passed = True  # 强制继续
+    # 记录哪些检查未通过
+    failed_checks = []
     
-    # 如果所有检查都通过，检查是否需要创建初始用户
-    if all_passed:
-        create_initial_user()
+    # 执行所有检查
+    for check_func, check_name in checks:
+        print_status("执行{}...".format(check_name), 'info')
+        time.sleep(0.5)  # 为了更好的用户体验，添加短暂延迟
         
-        # 启动服务
-        print_status(f"{BOLD}所有检查通过或被忽略，正在启动后端服务...{END}", 'success')
-        start_backend_service(port)
+        if not check_func():
+            print_status("{}失败".format(check_name), 'error')
+            failed_checks.append(check_name)
+            
+            # 根据检查项目，可能需要执行修复操作
+            if check_name == "数据库结构检查":
+                # 如果数据库结构检查失败，尝试创建表
+                if create_database_tables():
+                    # 创建初始用户
+                    create_initial_users()
+                    # 从失败列表中移除
+                    failed_checks.remove(check_name)
+    
+    # 检查端口
+    port_check_result = check_port_available(port)
+    if port_check_result is not True:
+        if isinstance(port_check_result, int):
+            # 端口已调整为新值
+            port = port_check_result
+        else:
+            # 端口检查失败且无法调整
+            print_status("无法找到可用端口，请手动指定其他端口", 'error')
+            sys.exit(1)
+    
+    # 如果所有检查都通过或者修复了问题，启动后端服务
+    if not failed_checks:
+        print_status("{}所有检查通过或被忽略，正在启动后端服务...{}".format(BOLD, END), 'success')
+        start_backend(port)
     else:
-        print_status(f"{BOLD}某些检查未通过，请解决问题后再尝试启动服务{END}", 'error')
+        print_status("{}某些检查未通过，请解决问题后再尝试启动服务{}".format(BOLD, END), 'error')
+        sys.exit(1)
 
 if __name__ == "__main__":
     main() 
