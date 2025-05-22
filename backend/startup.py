@@ -34,11 +34,11 @@ def parse_args():
 def print_status(message, status='info'):
     """打印带有颜色的状态信息"""
     prefix = {
-        'success': GREEN + "[✓]" + END + " ",
-        'warning': YELLOW + "[!]" + END + " ",
-        'error': RED + "[✗]" + END + " ",
-        'info': BOLD + "[*]" + END + " "
-    }.get(status, BOLD + "[*]" + END + " ")
+        'success': GREEN + "[成功]" + END + " ",
+        'warning': YELLOW + "[警告]" + END + " ",
+        'error': RED + "[错误]" + END + " ",
+        'info': BOLD + "[信息]" + END + " "
+    }.get(status, BOLD + "[信息]" + END + " ")
     
     print("{}{}".format(prefix, message))
 
@@ -105,7 +105,8 @@ def check_database_connection():
         with app.app_context():
             from app.models import db
             # 执行一个简单的查询以验证连接
-            db.engine.execute("SELECT 1")
+            with db.engine.connect() as conn:
+                conn.execute(db.text("SELECT 1"))
             return True
     except Exception as e:
         print_status("创建应用上下文时出错: {}".format(str(e)), 'error')
@@ -124,7 +125,7 @@ def check_database_structure():
             
             # 测试连接是否有效
             try:
-                conn.execute("SELECT 1")
+                conn.execute(db.text("SELECT 1"))
             except Exception as e:
                 print_status("数据库连接失败: {}".format(str(e)), 'error')
                 return False
@@ -135,14 +136,14 @@ def check_database_structure():
             # 检查表是否存在
             for table in required_tables:
                 # 这里使用SQL来检查表是否存在
-                query = """
+                query = db.text("""
                 SELECT EXISTS (
                     SELECT FROM information_schema.tables 
-                    WHERE table_name = '{}'
+                    WHERE table_name = :table_name
                 );
-                """.format(table)
+                """)
                 
-                result = conn.execute(query).scalar()
+                result = conn.execute(query, {"table_name": table}).scalar()
                 
                 if result:
                     print_status("表 {} 已存在".format(table), 'success')
@@ -283,7 +284,7 @@ def main():
     port = args.port
     
     # 显示启动信息
-    print_status("{}开始 SoftLink 后端服务启动流程{}".format(BOLD, END), 'info')
+    print_status("开始 SoftLink 后端服务启动流程".format(BOLD, END), 'info')
     print_status("将使用端口: {}".format(port), 'info')
     
     # 检查项及其描述
@@ -329,10 +330,10 @@ def main():
     
     # 如果所有检查都通过或者修复了问题，启动后端服务
     if not failed_checks:
-        print_status("{}所有检查通过或被忽略，正在启动后端服务...{}".format(BOLD, END), 'success')
+        print_status("所有检查通过或被忽略，正在启动后端服务...", 'success')
         start_backend(port)
     else:
-        print_status("{}某些检查未通过，请解决问题后再尝试启动服务{}".format(BOLD, END), 'error')
+        print_status("某些检查未通过，请解决问题后再尝试启动服务", 'error')
         sys.exit(1)
 
 if __name__ == "__main__":

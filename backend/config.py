@@ -1,7 +1,7 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv()  # 加载 .env 文件中的环境变量
+load_dotenv()  # Load environment variables from .env file
 
 # Construct the absolute path for the instance folder and the SQLite database
 # Assuming this config.py is in the 'backend' directory.

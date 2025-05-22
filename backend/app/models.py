@@ -3,13 +3,13 @@ import uuid
 from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
 from flask import current_app
-from . import db # 改为相对导入
+from . import db # using relative import
 from sqlalchemy import Column, Integer, String, DateTime, Boolean, ForeignKey, Text, Float, JSON, func
 from sqlalchemy.orm import relationship
-# from sqlalchemy.dialects.postgresql import JSONB  # 注释掉，不使用PostgreSQL的JSONB类型
+# from sqlalchemy.dialects.postgresql import JSONB  # Not using PostgreSQL's JSONB type
 
 class VIPLevel(db.Model):
-    """VIP等级表"""
+    """VIP Level Table"""
     __tablename__ = 'vip_levels'
 
     id = db.Column(db.Integer, primary_key=True)
@@ -117,7 +117,7 @@ class Feedback(db.Model):
     submitted_at = db.Column(db.DateTime, default=datetime.utcnow)
     resolved_at = db.Column(db.DateTime, nullable=True)
     resolver_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True) # Admin/Developer who resolved it
-    resolution_notes = db.Column(db.Text, nullable=True) # 添加解决备注字段
+    resolution_notes = db.Column(db.Text, nullable=True) # Resolution notes
 
     user = db.relationship('User', foreign_keys=[user_id], backref=db.backref('feedbacks', lazy='dynamic'))
     resolver = db.relationship('User', foreign_keys=[resolver_id])
@@ -240,7 +240,7 @@ class UserPreference(db.Model):
     __tablename__ = 'user_preferences'
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), unique=True, nullable=False, index=True)
-    theme = db.Column(db.String(50), nullable=True, default='light') # e.g., 'light', 'dark', '科技蓝'
+    theme = db.Column(db.String(50), nullable=True, default='light') # e.g., 'light', 'dark', 'tech-blue'
     language = db.Column(db.String(20), nullable=True, default='zh-CN') # e.g., 'zh-CN', 'en-US'
     notification_settings = db.Column(JSON, nullable=True) # e.g., {"email_updates": true, "system_alerts": true}
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
