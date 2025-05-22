@@ -83,6 +83,40 @@ DB_NAME="${DB_NAME:-softlink}"
 # 是否更新安全密钥
 UPDATE_SECURITY_KEYS=false
 
+# 显示帮助信息
+show_help() {
+    cat << EOF
+SoftLink项目部署脚本
+用法: ./deploy_softlink.sh [选项]
+
+选项:
+  --help          显示此帮助信息
+  --update-keys   更新安全密钥（会使现有会话失效）
+  --no-root       不使用root权限运行（不推荐）
+  --force         强制模式，不询问确认
+  --port <端口>   指定后端服务端口（默认: 5000）
+
+示例:
+  ./deploy_softlink.sh              # 正常部署，保留现有密钥
+  ./deploy_softlink.sh --update-keys # 部署并更新安全密钥
+  ./deploy_softlink.sh --force      # 强制部署，自动停止冲突服务
+  ./deploy_softlink.sh --port 5001  # 指定后端端口为5001
+
+注意:
+  1. 建议在部署前备份重要数据
+  2. 部署日志将保存在 $LOG_DIR 目录
+  3. 如遇问题，请查看错误日志: $ERROR_LOG
+  4. 如果默认端口5000被占用，可以使用--port选项指定其他端口
+
+端口冲突处理:
+  - 如果检测到端口冲突，脚本会提供以下选项:
+    a) 终止占用端口的进程（谨慎使用）
+    b) 更改SoftLink使用的端口
+    c) 退出部署
+  - 对于系统服务，建议更改SoftLink使用的端口而非终止服务
+EOF
+}
+
 # 初始化日志系统
 init_logging() {
     # 创建日志目录
@@ -130,6 +164,22 @@ error() {
     echo "[$timestamp][错误] $1" >> "$ERROR_LOG"
 }
 
+# 清理函数
+cleanup() {
+    log "===== 清理临时文件和进程 ====="
+    
+    # 删除临时文件
+    rm -f "$FRONTEND_DIR/nginx.temp.conf"
+    
+    # 如果部署失败，清理PID文件
+    if [ $? -ne 0 ]; then
+        rm -f "$PROJECT_ROOT/backend.pid"
+    fi
+    
+    # 记录清理完成
+    log "清理完成"
+}
+
 # 错误处理函数
 handle_error() {
     local exit_code=$1
@@ -168,22 +218,6 @@ handle_error() {
     return $exit_code
 }
 
-# 清理函数
-cleanup() {
-    log "===== 清理临时文件和进程 ====="
-    
-    # 删除临时文件
-    rm -f "$FRONTEND_DIR/nginx.temp.conf"
-    
-    # 如果部署失败，清理PID文件
-    if [ $? -ne 0 ]; then
-        rm -f "$PROJECT_ROOT/backend.pid"
-    fi
-    
-    # 记录清理完成
-    log "清理完成"
-}
-
 # 设置错误处理陷阱
 trap 'handle_error $? "意外终止" "${FUNCNAME[0]}"' ERR
 
@@ -204,9 +238,9 @@ while [[ $# -gt 0 ]]; do
     --port)
       if [[ $2 =~ ^[0-9]+$ ]] && [ $2 -gt 1024 ] && [ $2 -lt 65535 ]; then
         BACKEND_PORT=$2
-        log "使用自定义后端端口: $BACKEND_PORT"
+        echo "使用自定义后端端口: $BACKEND_PORT"
       else
-        error "无效的端口号: $2，必须是1024-65535之间的数字"
+        echo "无效的端口号: $2，必须是1024-65535之间的数字"
         exit 1
       fi
       shift 2
@@ -380,7 +414,7 @@ check_service_status() {
     log "===== 检查服务状态 ====="
     
     local SERVICES_RUNNING=false
-    local FORCE_STOP=${1:-false}
+    local FORCE_STOP="${1:-false}"
     
     # 检查后端服务
     local BACKEND_RUNNING=false
@@ -424,7 +458,7 @@ check_service_status() {
     
     # 如果有服务正在运行或端口被占用
     if [ "$SERVICES_RUNNING" = true ] || [ "$PORTS_OCCUPIED" = true ]; then
-        if [ "$FORCE_STOP" = true ]; then
+        if [ "$FORCE_MODE" = true ]; then
             log "强制停止现有服务..."
             stop_services "force"
         else
@@ -442,8 +476,8 @@ check_service_status() {
     fi
     
     # 确保端口可用
-    check_and_free_port $BACKEND_PORT "backend" "$FORCE_STOP" || exit 1
-    check_and_free_port $FRONTEND_PORT "nginx" "$FORCE_STOP" || exit 1
+    check_and_free_port $BACKEND_PORT "backend" "$FORCE_MODE" || exit 1
+    check_and_free_port $FRONTEND_PORT "nginx" "$FORCE_MODE" || exit 1
     
     success "服务状态检查完成"
 }
@@ -451,6 +485,7 @@ check_service_status() {
 # 首先停止可能已经运行的服务
 stop_services() {
     log "===== 停止已运行的服务 ====="
+    local FORCE="${1:-false}"
     
     # 停止后端服务
     if [ -f "$PROJECT_ROOT/backend.pid" ]; then
@@ -1006,40 +1041,6 @@ EOF
 
     chmod +x "$PROJECT_ROOT/stop_softlink.sh"
     success "已创建停止脚本: $PROJECT_ROOT/stop_softlink.sh"
-}
-
-# 显示帮助信息
-show_help() {
-    cat << EOF
-SoftLink项目部署脚本
-用法: ./deploy_softlink.sh [选项]
-
-选项:
-  --help          显示此帮助信息
-  --update-keys   更新安全密钥（会使现有会话失效）
-  --no-root       不使用root权限运行（不推荐）
-  --force         强制模式，不询问确认
-  --port <端口>   指定后端服务端口（默认: 5000）
-
-示例:
-  ./deploy_softlink.sh              # 正常部署，保留现有密钥
-  ./deploy_softlink.sh --update-keys # 部署并更新安全密钥
-  ./deploy_softlink.sh --force      # 强制部署，自动停止冲突服务
-  ./deploy_softlink.sh --port 5001  # 指定后端端口为5001
-
-注意:
-  1. 建议在部署前备份重要数据
-  2. 部署日志将保存在 $LOG_DIR 目录
-  3. 如遇问题，请查看错误日志: $ERROR_LOG
-  4. 如果默认端口5000被占用，可以使用--port选项指定其他端口
-
-端口冲突处理:
-  - 如果检测到端口冲突，脚本会提供以下选项:
-    a) 终止占用端口的进程（谨慎使用）
-    b) 更改SoftLink使用的端口
-    c) 退出部署
-  - 对于系统服务，建议更改SoftLink使用的端口而非终止服务
-EOF
 }
 
 # 备份现有配置文件
