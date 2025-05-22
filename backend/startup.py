@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 
 """
-SoftLink 后端服务启动脚本
-- 检查环境配置
-- 验证数据库连接和表结构
-- 启动后端服务
+SoftLink Backend Service Startup Script
+- Check environment configuration
+- Verify database connection and table structure
+- Start backend service
 """
 
 import os
@@ -26,19 +26,19 @@ BOLD = '\033[1m'
 
 # 解析命令行参数
 def parse_args():
-    parser = argparse.ArgumentParser(description='SoftLink后端服务启动脚本')
+    parser = argparse.ArgumentParser(description='SoftLink Backend Service Startup Script')
     parser.add_argument('--port', type=int, default=int(os.environ.get('FLASK_RUN_PORT', 5000)),
-                      help='指定后端服务端口（默认：5000或环境变量FLASK_RUN_PORT）')
+                      help='Specify backend service port (default: 5000 or env var FLASK_RUN_PORT)')
     return parser.parse_args()
 
 def print_status(message, status='info'):
     """打印带有颜色的状态信息"""
     prefix = {
-        'success': GREEN + "[成功]" + END + " ",
-        'warning': YELLOW + "[警告]" + END + " ",
-        'error': RED + "[错误]" + END + " ",
-        'info': BOLD + "[信息]" + END + " "
-    }.get(status, BOLD + "[信息]" + END + " ")
+        'success': GREEN + "[SUCCESS]" + END + " ",
+        'warning': YELLOW + "[WARNING]" + END + " ",
+        'error': RED + "[ERROR]" + END + " ",
+        'info': BOLD + "[INFO]" + END + " "
+    }.get(status, BOLD + "[INFO]" + END + " ")
     
     print("{}{}".format(prefix, message))
 
@@ -46,10 +46,10 @@ def check_python_version():
     """检查Python版本是否满足要求"""
     major, minor = sys.version_info.major, sys.version_info.minor
     if major < 3 or (major == 3 and minor < 6):
-        print_status("Python版本过低: {}.{}，需要3.6或更高版本".format(major, minor), 'error')
+        print_status("Python version too low: {}.{}, need 3.6 or higher".format(major, minor), 'error')
         return False
     else:
-        print_status("Python版本 {}.{} 符合要求".format(major, minor), 'success')
+        print_status("Python version {}.{} meets requirements".format(major, minor), 'success')
         return True
 
 def check_dependencies():
@@ -58,9 +58,9 @@ def check_dependencies():
     for package in packages:
         try:
             importlib.import_module(package)
-            print_status("依赖 {} 已安装".format(package), 'success')
+            print_status("Dependency {} is installed".format(package), 'success')
         except ImportError:
-            print_status("缺少依赖: {}".format(package), 'error')
+            print_status("Missing dependency: {}".format(package), 'error')
             return False
     return True
 
@@ -70,10 +70,10 @@ def check_config_files():
     config_file = os.path.join(current_dir, '.env')
     
     if os.path.exists(config_file):
-        print_status("配置文件 {} 存在".format(config_file), 'success')
+        print_status("Config file {} exists".format(config_file), 'success')
         return True
     else:
-        print_status("配置文件 {} 不存在，将尝试其他位置".format(config_file), 'info')
+        print_status("Config file {} does not exist, will try other locations".format(config_file), 'info')
         
         # 检查上层目录
         parent_dir = os.path.dirname(current_dir)
@@ -92,7 +92,7 @@ def database_context():
         with app.app_context():
             yield db
     except Exception as e:
-        print_status(f"创建应用上下文时出错: {str(e)}", 'error')
+        print_status(f"Error creating application context: {str(e)}", 'error')
         yield None
 
 def check_database_connection():
@@ -109,7 +109,7 @@ def check_database_connection():
                 conn.execute(db.text("SELECT 1"))
             return True
     except Exception as e:
-        print_status("创建应用上下文时出错: {}".format(str(e)), 'error')
+        print_status("Error creating application context: {}".format(str(e)), 'error')
         return False
 
 def check_database_structure():
@@ -127,7 +127,7 @@ def check_database_structure():
             try:
                 conn.execute(db.text("SELECT 1"))
             except Exception as e:
-                print_status("数据库连接失败: {}".format(str(e)), 'error')
+                print_status("Database connection failed: {}".format(str(e)), 'error')
                 return False
                 
             # 列出所有要检查的表名
@@ -146,49 +146,49 @@ def check_database_structure():
                 result = conn.execute(query, {"table_name": table}).scalar()
                 
                 if result:
-                    print_status("表 {} 已存在".format(table), 'success')
+                    print_status("Table {} exists".format(table), 'success')
                 else:
-                    print_status("表 {} 不存在".format(table), 'error')
+                    print_status("Table {} does not exist".format(table), 'error')
                     return False
             
             return True
     except Exception as e:
-        print_status("检查数据库表时出错: {}".format(str(e)), 'error')
+        print_status("Error checking database tables: {}".format(str(e)), 'error')
         return False
 
 def check_port_available(port):
     """检查端口是否可用"""
-    print_status("检查端口 {} 是否可用...".format(port), 'info')
+    print_status("Checking if port {} is available...".format(port), 'info')
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         sock.bind(('localhost', port))
         sock.close()
-        print_status("端口 {} 可用".format(port), 'success')
+        print_status("Port {} is available".format(port), 'success')
         return True
     except socket.error:
         sock.close()
-        print_status("端口 {} 已被占用".format(port), 'error')
+        print_status("Port {} is already in use".format(port), 'error')
         # 自动查找可用端口
         return suggest_available_port()
 
 def suggest_available_port():
     """建议一个可用的端口"""
-    print_status("尝试查找可用端口...", 'info')
+    print_status("Trying to find an available port...", 'info')
     for test_port in range(5000, 5100):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             sock.bind(('localhost', test_port))
             sock.close()
-            print_status("找到可用端口: {}".format(test_port), 'success')
-            response = input("是否使用端口 {}? (y/n): ".format(test_port))
+            print_status("Found available port: {}".format(test_port), 'success')
+            response = input("Use port {}? (y/n): ".format(test_port))
             if response.lower() == 'y':
                 return test_port
         except socket.error:
             sock.close()
             continue
     
-    print_status("在端口范围5000-5099中找不到可用端口", 'error')
-    response = input("是否尝试使用更高端口号? (y/n): ")
+    print_status("Could not find available port in range 5000-5099", 'error')
+    response = input("Try higher port numbers? (y/n): ")
     if response.lower() == 'y':
         # 尝试更高的端口范围
         for test_port in range(8000, 8100):
@@ -196,8 +196,8 @@ def suggest_available_port():
             try:
                 sock.bind(('localhost', test_port))
                 sock.close()
-                print_status("找到可用端口: {}".format(test_port), 'success')
-                response = input("是否使用端口 {}? (y/n): ".format(test_port))
+                print_status("Found available port: {}".format(test_port), 'success')
+                response = input("Use port {}? (y/n): ".format(test_port))
                 if response.lower() == 'y':
                     return test_port
             except socket.error:
@@ -218,7 +218,7 @@ def create_database_tables():
             db.create_all()
         return True
     except Exception as e:
-        print_status("创建数据库表时出错: {}".format(str(e)), 'error')
+        print_status("Error creating database tables: {}".format(str(e)), 'error')
         return False
 
 def create_initial_users():
@@ -252,19 +252,19 @@ def create_initial_users():
             
         return True
     except Exception as e:
-        print_status("检查/创建初始用户时出错: {}".format(str(e)), 'error')
+        print_status("Error checking/creating initial users: {}".format(str(e)), 'error')
         return False
 
 def start_backend(port):
     """启动后端服务"""
-    print_status("准备启动后端服务在端口 {}...".format(port), 'info')
+    print_status("Preparing to start backend service on port {}...".format(port), 'info')
     
     try:
         # 使用flask run命令启动服务
         os.environ['FLASK_APP'] = 'run.py'
         os.environ['FLASK_RUN_PORT'] = str(port)
         
-        print_status("正在启动后端服务在端口 {}...".format(port), 'info')
+        print_status("Starting backend service on port {}...".format(port), 'info')
         
         # 使用subprocess启动Flask应用
         subprocess.Popen(
@@ -274,7 +274,7 @@ def start_backend(port):
         
         return True
     except Exception as e:
-        print_status("启动后端服务时出错: {}".format(str(e)), 'error')
+        print_status("Error starting backend service: {}".format(str(e)), 'error')
         return False
 
 def main():
@@ -284,16 +284,16 @@ def main():
     port = args.port
     
     # 显示启动信息
-    print_status("开始 SoftLink 后端服务启动流程".format(BOLD, END), 'info')
-    print_status("将使用端口: {}".format(port), 'info')
+    print_status("Starting SoftLink Backend Service", 'info')
+    print_status("Using port: {}".format(port), 'info')
     
     # 检查项及其描述
     checks = [
-        (check_python_version, "Python版本检查"),
-        (check_dependencies, "依赖检查"),
-        (check_config_files, "配置文件检查"),
-        (check_database_connection, "数据库连接检查"),
-        (check_database_structure, "数据库结构检查")
+        (check_python_version, "Python version check"),
+        (check_dependencies, "Dependencies check"),
+        (check_config_files, "Config files check"),
+        (check_database_connection, "Database connection check"),
+        (check_database_structure, "Database structure check")
     ]
     
     # 记录哪些检查未通过
@@ -301,15 +301,15 @@ def main():
     
     # 执行所有检查
     for check_func, check_name in checks:
-        print_status("执行{}...".format(check_name), 'info')
+        print_status("Running {}...".format(check_name), 'info')
         time.sleep(0.5)  # 为了更好的用户体验，添加短暂延迟
         
         if not check_func():
-            print_status("{}失败".format(check_name), 'error')
+            print_status("{} failed".format(check_name), 'error')
             failed_checks.append(check_name)
             
             # 根据检查项目，可能需要执行修复操作
-            if check_name == "数据库结构检查":
+            if check_name == "Database structure check":
                 # 如果数据库结构检查失败，尝试创建表
                 if create_database_tables():
                     # 创建初始用户
@@ -325,15 +325,15 @@ def main():
             port = port_check_result
         else:
             # 端口检查失败且无法调整
-            print_status("无法找到可用端口，请手动指定其他端口", 'error')
+            print_status("No available port found, please specify another port manually", 'error')
             sys.exit(1)
     
     # 如果所有检查都通过或者修复了问题，启动后端服务
     if not failed_checks:
-        print_status("所有检查通过或被忽略，正在启动后端服务...", 'success')
+        print_status("All checks passed or ignored, starting backend service...", 'success')
         start_backend(port)
     else:
-        print_status("某些检查未通过，请解决问题后再尝试启动服务", 'error')
+        print_status("Some checks failed, please fix the issues before starting the service", 'error')
         sys.exit(1)
 
 if __name__ == "__main__":
