@@ -259,7 +259,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# 检查端口是否被占用并尝试释放
+# 检查端口是否被占用并尝试释放 - 增加netstat兼容性
 check_and_free_port() {
     local PORT=$1
     local SERVICE_NAME=$2
@@ -267,17 +267,45 @@ check_and_free_port() {
     
     log "检查端口 $PORT 是否被占用..."
     
-    # 检查端口是否被占用
-    if lsof -i:$PORT -P -n &> /dev/null; then
+    # 检查端口是否被占用 (支持lsof或netstat)
+    local PORT_OCCUPIED=false
+    local PID=""
+    local PROCESS_NAME=""
+    local PROCESS_USER=""
+    local PROCESS_CMD=""
+    
+    if command -v lsof &> /dev/null; then
+        if lsof -i:$PORT -P -n &> /dev/null; then
+            PORT_OCCUPIED=true
+            local PID_INFO=$(lsof -i:$PORT -P -n | grep LISTEN)
+            PID=$(echo "$PID_INFO" | awk '{print $2}')
+            PROCESS_NAME=$(echo "$PID_INFO" | awk '{print $1}')
+            PROCESS_USER=$(ps -o user= -p $PID)
+            PROCESS_CMD=$(ps -o cmd= -p $PID | head -c 50)
+        fi
+    elif command -v netstat &> /dev/null; then
+        if netstat -tuln | grep ":$PORT " &> /dev/null; then
+            PORT_OCCUPIED=true
+            PID=$(netstat -tuln -p 2>/dev/null | grep ":$PORT " | awk '{print $7}' | cut -d'/' -f1)
+            if [ ! -z "$PID" ]; then
+                PROCESS_NAME=$(ps -p $PID -o comm=)
+                PROCESS_USER=$(ps -o user= -p $PID)
+                PROCESS_CMD=$(ps -o cmd= -p $PID | head -c 50)
+            else
+                # 如果netstat没有显示PID，尝试使用其他方法
+                warn "无法获取占用端口 $PORT 的进程ID"
+                PROCESS_NAME="未知"
+                PROCESS_USER="未知"
+                PROCESS_CMD="未知"
+            fi
+        fi
+    else
+        warn "无法检查端口 $PORT，lsof和netstat都不可用"
+        return 0
+    fi
+    
+    if [ "$PORT_OCCUPIED" = true ]; then
         warn "端口 $PORT 已被占用，尝试识别占用进程..."
-        
-        # 获取占用端口的进程信息
-        local PID_INFO=$(lsof -i:$PORT -P -n | grep LISTEN)
-        local PID=$(echo "$PID_INFO" | awk '{print $2}')
-        local PROCESS_NAME=$(echo "$PID_INFO" | awk '{print $1}')
-        local PROCESS_USER=$(ps -o user= -p $PID)
-        local PROCESS_CMD=$(ps -o cmd= -p $PID | head -c 50)
-        
         warn "端口 $PORT 被进程 $PROCESS_NAME (PID: $PID, 用户: $PROCESS_USER) 占用"
         warn "进程命令: $PROCESS_CMD"
         
@@ -548,12 +576,27 @@ stop_services() {
     fi
 }
 
-# 检查命令是否存在
+# 检查命令是否存在，如不存在则尝试安装
 check_command() {
     if ! command -v $1 &> /dev/null; then
-        error "$1 未安装。请安装后重试。"
-        echo -e "  安装命令: $2" | tee -a $LOG_FILE
-        return 1
+        error "$1 未安装。尝试自动安装..."
+        if [ "$OS" = "centos" ] || [ "$OS" = "rhel" ]; then
+            sudo yum install -y $1 || {
+                error "$1 安装失败。请手动执行: $2"
+                return 1
+            }
+        elif [ "$OS" = "ubuntu" ] || [ "$OS" = "debian" ]; then
+            sudo apt-get update && sudo apt-get install -y $1 || {
+                error "$1 安装失败。请手动执行: $2"
+                return 1
+            }
+        else
+            error "$1 未安装。请安装后重试。"
+            echo -e "  安装命令: $2" | tee -a $LOG_FILE
+            return 1
+        fi
+        success "$1 已成功安装"
+        return 0
     else
         success "$1 已安装"
         return 0
@@ -587,13 +630,33 @@ check_system_env() {
     check_command "pip3" "sudo apt update && sudo apt install -y python3-pip"
     check_command "nginx" "sudo apt update && sudo apt install -y nginx"
     check_command "git" "sudo apt update && sudo apt install -y git"
+    check_command "lsof" "sudo apt update && sudo apt install -y lsof" || {
+        warn "lsof 命令不可用，将使用 netstat 命令检查端口"
+        check_command "netstat" "sudo apt update && sudo apt install -y net-tools"
+    }
     
     # 检查端口占用情况
     check_and_free_port $BACKEND_PORT "backend" false
     check_and_free_port $FRONTEND_PORT "nginx" false
 }
 
-# 设置后端环境
+# 安全的sed替换函数，适应不同系统
+safe_sed() {
+    local pattern="$1"
+    local file="$2"
+    
+    # 检查是否为BSD sed (macOS)
+    if sed --version 2>&1 | grep -q "GNU"; then
+        # GNU sed
+        sed -i "$pattern" "$file"
+    else
+        # BSD sed (需要备份扩展名)
+        sed -i.bak "$pattern" "$file"
+        rm -f "${file}.bak"
+    fi
+}
+
+# 设置后端环境 - 修改以确保软件包安装成功
 setup_backend() {
     log "===== 设置后端环境 ====="
     
@@ -602,25 +665,36 @@ setup_backend() {
     # 检查虚拟环境
     if [ ! -d "venv" ]; then
         log "创建Python虚拟环境..."
-        python3 -m venv venv
-        if [ $? -ne 0 ]; then
-            error "创建虚拟环境失败"
-            return 1
-        fi
+        python3 -m venv venv || {
+            error "创建虚拟环境失败，尝试不带venv创建"
+            python3 -m virtualenv venv || {
+                error "virtualenv创建失败，尝试直接安装包"
+                pip3 install -r requirements.txt
+                if [ $? -ne 0 ]; then
+                    error "安装依赖失败"
+                    return 1
+                fi
+                success "已直接安装Python依赖"
+                USE_VENV=false
+            }
+        }
     else
         log "已存在虚拟环境"
     fi
     
-    # 激活虚拟环境
-    log "激活虚拟环境..."
-    source venv/bin/activate
-    
-    # 安装依赖
-    log "安装Python依赖..."
-    pip install -r requirements.txt
-    if [ $? -ne 0 ]; then
-        error "安装依赖失败"
-        return 1
+    # 如果USE_VENV未设置为false，则使用虚拟环境
+    if [ "${USE_VENV:-true}" = true ]; then
+        # 激活虚拟环境
+        log "激活虚拟环境..."
+        source venv/bin/activate
+        
+        # 安装依赖
+        log "安装Python依赖..."
+        pip install -r requirements.txt
+        if [ $? -ne 0 ]; then
+            error "安装依赖失败"
+            return 1
+        fi
     fi
     
     # 更新 .env 文件中的数据库配置
@@ -630,19 +704,19 @@ setup_backend() {
         # 备份原有.env文件
         cp "$PROJECT_ROOT/.env" "$CONFIG_BACKUP_DIR/.env.backup"
         
-        # 更新数据库连接 URL
-        sed -i "s|DATABASE_URL=.*|DATABASE_URL=postgresql://$DB_USER:$DB_PASS@$DB_HOST:$DB_PORT/$DB_NAME|g" "$PROJECT_ROOT/.env"
+        # 更新数据库连接 URL (使用安全的sed替换)
+        safe_sed "s|DATABASE_URL=.*|DATABASE_URL=postgresql://$DB_USER:$DB_PASS@$DB_HOST:$DB_PORT/$DB_NAME?client_encoding=utf8|g" "$PROJECT_ROOT/.env"
         
         # 更新调试标志
-        sed -i "s|DEBUG=.*|DEBUG=False|g" "$PROJECT_ROOT/.env"
+        safe_sed "s|DEBUG=.*|DEBUG=False|g" "$PROJECT_ROOT/.env"
         
         # 根据参数决定是否更新安全密钥
         if [ "$UPDATE_SECURITY_KEYS" = true ]; then
             log "更新安全密钥..."
             NEW_SECRET_KEY=$(openssl rand -hex 32)
             NEW_JWT_KEY=$(openssl rand -hex 32)
-            sed -i "s|SECRET_KEY=.*|SECRET_KEY=$NEW_SECRET_KEY|g" "$PROJECT_ROOT/.env"
-            sed -i "s|JWT_SECRET_KEY=.*|JWT_SECRET_KEY=$NEW_JWT_KEY|g" "$PROJECT_ROOT/.env"
+            safe_sed "s|SECRET_KEY=.*|SECRET_KEY=$NEW_SECRET_KEY|g" "$PROJECT_ROOT/.env"
+            safe_sed "s|JWT_SECRET_KEY=.*|JWT_SECRET_KEY=$NEW_JWT_KEY|g" "$PROJECT_ROOT/.env"
             success "已生成新的安全密钥"
             warn "注意：更新密钥会导致所有现有用户会话和JWT令牌失效"
         else
@@ -650,8 +724,8 @@ setup_backend() {
             if grep -q "your-super-secret-key" "$PROJECT_ROOT/.env"; then
                 NEW_SECRET_KEY=$(openssl rand -hex 32)
                 NEW_JWT_KEY=$(openssl rand -hex 32)
-                sed -i "s|SECRET_KEY=.*|SECRET_KEY=$NEW_SECRET_KEY|g" "$PROJECT_ROOT/.env"
-                sed -i "s|JWT_SECRET_KEY=.*|JWT_SECRET_KEY=$NEW_JWT_KEY|g" "$PROJECT_ROOT/.env"
+                safe_sed "s|SECRET_KEY=.*|SECRET_KEY=$NEW_SECRET_KEY|g" "$PROJECT_ROOT/.env"
+                safe_sed "s|JWT_SECRET_KEY=.*|JWT_SECRET_KEY=$NEW_JWT_KEY|g" "$PROJECT_ROOT/.env"
                 log "生成了新的安全密钥"
             else
                 log "保留现有安全密钥"
@@ -666,9 +740,10 @@ setup_backend() {
 # Flask配置
 FLASK_ENV=production
 FLASK_APP=app.py
+FLASK_RUN_PORT=$BACKEND_PORT
 
 # 数据库配置
-DATABASE_URL=postgresql://$DB_USER:$DB_PASS@$DB_HOST:$DB_PORT/$DB_NAME
+DATABASE_URL=postgresql://$DB_USER:$DB_PASS@$DB_HOST:$DB_PORT/$DB_NAME?client_encoding=utf8
 
 # Redis配置
 # REDIS_URL=redis://localhost:6379/0
@@ -688,167 +763,9 @@ EOL
     return 0
 }
 
-# 配置Nginx
-setup_nginx() {
-    log "===== 配置Nginx ====="
-    
-    # 检查Nginx配置文件
-    if [ ! -f "$NGINX_CONF" ]; then
-        error "未找到Nginx配置文件: $NGINX_CONF"
-        return 1
-    fi
-    
-    # 修改Nginx配置中的路径和服务名
-    log "更新Nginx配置文件..."
-    
-    # 创建临时配置文件
-    cat > "$FRONTEND_DIR/nginx.temp.conf" << EOL
-server {
-    listen 80;
-    server_name $SERVER_IP;
-    
-    # GZIP压缩配置，提高传输效率
-    gzip on;
-    gzip_comp_level 5;
-    gzip_min_length 256;
-    gzip_proxied any;
-    gzip_types
-        application/javascript
-        application/json
-        application/xml
-        text/css
-        text/plain
-        text/xml
-        image/svg+xml;
-    
-    # 静态资源缓存设置
-    location /static/ {
-        alias $PROJECT_ROOT/frontend/softlin-f/static/;
-        expires 30d;
-        add_header Cache-Control "public, no-transform";
-    }
-    
-    # API请求代理到后端
-    location /api/ {
-        proxy_pass http://localhost:$BACKEND_PORT/;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host \$host;
-        proxy_cache_bypass \$http_upgrade;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    }
-    
-    # 所有其他请求返回index.html (单页应用配置)
-    location / {
-        root $PROJECT_ROOT/frontend/softlin-f;
-        try_files \$uri \$uri/ /index.html;
-        index index.html;
-    }
-    
-    # 错误页面配置
-    error_page 500 502 503 504 /50x.html;
-    location = /50x.html {
-        root $PROJECT_ROOT/frontend/softlin-f;
-    }
-}
-EOL
-    
-    # 复制配置文件
-    log "应用Nginx配置..."
-    if [ -f "/etc/nginx/nginx.conf" ]; then
-        NGINX_CONF_DIR="/etc/nginx"
-    elif [ -f "$NGINX_PATH/conf/nginx.conf" ]; then
-        NGINX_CONF_DIR="$NGINX_PATH/conf"
-    else
-        error "无法找到Nginx配置目录"
-        return 1
-    fi
-    
-    log "将Nginx配置写入 $NGINX_CONF_DIR/conf.d/softlink.conf"
-    sudo mkdir -p "$NGINX_CONF_DIR/conf.d"
-    sudo cp -f "$FRONTEND_DIR/nginx.temp.conf" "$NGINX_CONF_DIR/conf.d/softlink.conf"
-    
-    # 确保主配置文件包含conf.d目录
-    if ! grep -q "include.*conf.d" "$NGINX_CONF_DIR/nginx.conf"; then
-        log "更新主Nginx配置文件以包含conf.d目录..."
-        sudo sed -i '/http {/a \    include /etc/nginx/conf.d/*.conf;' "$NGINX_CONF_DIR/nginx.conf"
-    fi
-    
-    # 测试配置
-    log "测试Nginx配置..."
-    sudo nginx -t
-    if [ $? -ne 0 ]; then
-        error "Nginx配置测试失败"
-        return 1
-    fi
-    
-    success "Nginx配置完成"
-    return 0
-}
-
-# 启动后端服务
-start_backend() {
-    log "===== 启动后端服务 ====="
-    
-    cd $BACKEND_DIR
-    
-    # 检查后端启动脚本
-    if [ ! -f "startup.py" ]; then
-        error "未找到后端启动脚本: startup.py"
-        return 1
-    fi
-    
-    # 激活虚拟环境
-    source venv/bin/activate
-    
-    # 确保环境变量中包含端口设置
-    export FLASK_RUN_PORT=$BACKEND_PORT
-    
-    # 更新.env文件中的端口配置
-    if [ -f "$ENV_FILE" ]; then
-        log "更新.env文件中的端口配置..."
-        if grep -q "FLASK_RUN_PORT=" "$ENV_FILE"; then
-            sed -i "s|FLASK_RUN_PORT=.*|FLASK_RUN_PORT=$BACKEND_PORT|g" "$ENV_FILE"
-        else
-            # 如果不存在FLASK_RUN_PORT配置，则添加
-            sed -i "/FLASK_APP=.*/a FLASK_RUN_PORT=$BACKEND_PORT" "$ENV_FILE"
-        fi
-        success "已更新.env文件中的端口配置为 $BACKEND_PORT"
-    fi
-    
-    # 启动后端服务
-    log "启动后端服务在端口 $BACKEND_PORT..."
-    nohup python startup.py --port $BACKEND_PORT > $BACKEND_DIR/backend.log 2>&1 &
-    BACKEND_PID=$!
-    
-    # 检查服务是否成功启动
-    sleep 5
-    if ps -p $BACKEND_PID > /dev/null; then
-        success "后端服务启动成功 (PID: $BACKEND_PID)"
-        echo $BACKEND_PID > "$PROJECT_ROOT/backend.pid"
-    else
-        error "后端服务启动失败，请检查backend.log文件"
-        cat $BACKEND_DIR/backend.log | tail -n 20 | tee -a $LOG_FILE
-        return 1
-    fi
-    
-    # 检查端口是否正常监听
-    sleep 2
-    if lsof -i:$BACKEND_PORT -P -n | grep LISTEN > /dev/null; then
-        success "后端服务正在监听端口 $BACKEND_PORT"
-    else
-        warn "后端服务可能未正确监听端口 $BACKEND_PORT，尝试查看日志..."
-        cat $BACKEND_DIR/backend.log | tail -n 20 | tee -a $LOG_FILE
-    fi
-    
-    return 0
-}
-
-# 启动前端服务
-start_frontend() {
-    log "===== 启动前端服务 ====="
+# 修正前端目录问题
+check_frontend_dir() {
+    log "===== 检查前端目录 ====="
     
     # 检查前端构建目录
     if [ ! -d "$FRONTEND_BUILD_DIR" ]; then
@@ -859,10 +776,13 @@ start_frontend() {
         if [ -d "$FRONTEND_DIR/softlink-f" ]; then
             log "找到softlink-f目录，重命名为softlin-f..."
             mv "$FRONTEND_DIR/softlink-f" "$FRONTEND_BUILD_DIR"
+            success "已将softlink-f重命名为softlin-f"
         else
             error "未找到任何前端构建目录"
             return 1
         fi
+    else
+        success "找到前端构建目录: $FRONTEND_BUILD_DIR"
     fi
     
     # 检查index.html
@@ -870,6 +790,20 @@ start_frontend() {
         error "前端构建目录中未找到index.html文件"
         return 1
     fi
+    
+    success "前端目录检查完成"
+    return 0
+}
+
+# 启动前端服务时添加前端目录检查
+start_frontend() {
+    log "===== 启动前端服务 ====="
+    
+    # 检查前端目录
+    check_frontend_dir || {
+        error "前端目录检查失败"
+        return 1
+    }
     
     # 重启Nginx
     log "重启Nginx服务..."
@@ -917,7 +851,21 @@ health_check() {
     
     # 检查后端API可访问性
     log "检查后端API可访问性..."
-    if curl -s --head http://localhost:$BACKEND_PORT > /dev/null; then
+    local API_ACCESSIBLE=false
+    
+    if command -v curl &> /dev/null; then
+        if curl -s --head --max-time 5 http://localhost:$BACKEND_PORT > /dev/null; then
+            API_ACCESSIBLE=true
+        fi
+    elif command -v wget &> /dev/null; then
+        if wget -q --spider --timeout=5 http://localhost:$BACKEND_PORT; then
+            API_ACCESSIBLE=true
+        fi
+    else
+        warn "无法检查API可访问性，curl和wget均不可用"
+    fi
+    
+    if [ "$API_ACCESSIBLE" = true ]; then
         success "后端API可以访问"
     else
         error "无法访问后端API"
@@ -927,7 +875,15 @@ health_check() {
     
     # 检查Nginx服务
     log "检查Nginx服务..."
-    if systemctl is-active --quiet nginx || pgrep nginx > /dev/null; then
+    local NGINX_RUNNING=false
+    
+    if command -v systemctl &> /dev/null && systemctl is-active --quiet nginx; then
+        NGINX_RUNNING=true
+    elif pgrep nginx > /dev/null; then
+        NGINX_RUNNING=true
+    fi
+    
+    if [ "$NGINX_RUNNING" = true ]; then
         success "Nginx服务运行正常"
     else
         error "Nginx服务未运行"
@@ -936,7 +892,21 @@ health_check() {
     
     # 检查前端可访问性
     log "检查前端可访问性..."
-    if curl -s --head http://localhost > /dev/null; then
+    local FRONTEND_ACCESSIBLE=false
+    
+    if command -v curl &> /dev/null; then
+        if curl -s --head --max-time 5 http://localhost > /dev/null; then
+            FRONTEND_ACCESSIBLE=true
+        fi
+    elif command -v wget &> /dev/null; then
+        if wget -q --spider --timeout=5 http://localhost; then
+            FRONTEND_ACCESSIBLE=true
+        fi
+    else
+        warn "无法检查前端可访问性，curl和wget均不可用"
+    fi
+    
+    if [ "$FRONTEND_ACCESSIBLE" = true ]; then
         success "前端页面可以访问"
     else
         error "无法访问前端页面"
@@ -944,7 +914,20 @@ health_check() {
         warn "解决方案: 检查Nginx错误日志(/var/log/nginx/error.log)，确保配置正确"
     fi
     
+    # 检查外部可访问性（用于腾讯云验证）
+    log "检查公网可访问性（可能需要几分钟才能生效）..."
+    PUBLIC_IP=$(curl -s http://ifconfig.me 2>/dev/null || curl -s https://ipinfo.io/ip 2>/dev/null || echo "无法获取")
+    
+    if [ "$PUBLIC_IP" != "无法获取" ]; then
+        log "服务器公网IP: $PUBLIC_IP"
+        log "请在浏览器中尝试访问 http://$PUBLIC_IP 验证部署是否成功"
+        log "如果无法访问，请检查腾讯云安全组设置"
+    else
+        warn "无法获取服务器公网IP，请手动在腾讯云控制台查看"
+    fi
+    
     log "健康检查完成，详细日志请查看: $LOG_FILE"
+    return 0
 }
 
 # 检查防火墙配置
@@ -952,12 +935,15 @@ check_firewall() {
     log "===== 检查防火墙配置 ====="
     
     # 检查常见防火墙工具
+    local FIREWALL_CONFIGURED=false
+    
     if command -v ufw &> /dev/null; then
         # Ubuntu等使用ufw
         log "使用ufw配置防火墙..."
         sudo ufw allow 80/tcp
         sudo ufw allow $BACKEND_PORT/tcp
         sudo ufw status | tee -a $LOG_FILE
+        FIREWALL_CONFIGURED=true
     elif command -v firewall-cmd &> /dev/null; then
         # CentOS等使用firewalld
         log "使用firewalld配置防火墙..."
@@ -965,11 +951,19 @@ check_firewall() {
         sudo firewall-cmd --permanent --add-port=$BACKEND_PORT/tcp
         sudo firewall-cmd --reload
         sudo firewall-cmd --list-all | tee -a $LOG_FILE
+        FIREWALL_CONFIGURED=true
     else
         warn "未检测到标准防火墙工具，请手动确保端口80和$BACKEND_PORT开放"
     fi
     
+    # 腾讯云特殊提示
+    log "在腾讯云上部署，请确保在腾讯云控制台中的安全组规则中已开放以下端口:"
+    log "  - TCP 80端口 (前端访问)"
+    log "  - TCP $BACKEND_PORT端口 (后端API)"
+    log "腾讯云安全组配置指南: https://cloud.tencent.com/document/product/213/34601"
+    
     success "防火墙配置检查完成"
+    return 0
 }
 
 # 显示系统信息
@@ -979,13 +973,22 @@ show_system_info() {
     # 获取服务器IP
     SERVER_IP=$(hostname -I | awk '{print $1}')
     
+    # 尝试获取公网IP
+    PUBLIC_IP=$(curl -s http://ifconfig.me 2>/dev/null || curl -s https://ipinfo.io/ip 2>/dev/null || echo "$SERVER_IP")
+    
     echo -e "\n${GREEN}==================================${NC}"
     echo -e "${GREEN}  SoftLink系统部署完成${NC}"
     echo -e "${GREEN}==================================${NC}"
-    echo -e "前端访问地址: ${BLUE}http://$SERVER_IP${NC}"
-    echo -e "后端API地址: ${BLUE}http://$SERVER_IP:$BACKEND_PORT${NC}"
+    echo -e "前端访问地址: ${BLUE}http://$PUBLIC_IP${NC}"
+    echo -e "后端API地址: ${BLUE}http://$PUBLIC_IP:$BACKEND_PORT${NC}"
+    echo -e "内网访问地址: ${BLUE}http://$SERVER_IP${NC}"
     echo -e "部署日志文件: ${YELLOW}$LOG_FILE${NC}"
     echo -e "\n如需停止服务，请运行: ${YELLOW}$PROJECT_ROOT/stop_softlink.sh${NC}"
+    
+    # 腾讯云提示
+    echo -e "\n${YELLOW}腾讯云部署注意事项:${NC}"
+    echo -e "1. 请确保在腾讯云控制台中已配置安全组规则"
+    echo -e "2. 如果使用域名访问，请将域名解析到服务器公网IP: ${BLUE}$PUBLIC_IP${NC}"
     
     # 显示安全密钥更新信息
     if [ "$UPDATE_SECURITY_KEYS" = true ]; then
@@ -1132,17 +1135,21 @@ main() {
     init_logging
     
     # 显示脚本参数信息
-    log "开始部署SoftLink项目..."
+    log "开始部署SoftLink项目到腾讯云服务器..."
+    log "使用后端端口: $BACKEND_PORT"
     if [ "$UPDATE_SECURITY_KEYS" = true ]; then
         log "参数: 将更新安全密钥"
+    fi
+    if [ "$FORCE_MODE" = true ]; then
+        log "参数: 强制模式已启用"
     fi
     
     # 创建备份
     backup_configs
     
-    # 验证配置文件
-    validate_configs || {
-        error "配置验证失败"
+    # 检查系统环境
+    check_system_env || {
+        error "系统环境检查失败"
         return 1
     }
     
@@ -1152,10 +1159,14 @@ main() {
         return 1
     }
     
-    # 检查系统环境
-    check_system_env || {
-        error "系统环境检查失败"
-        return 1
+    # 检查前端目录
+    check_frontend_dir || {
+        error "前端目录检查失败，尝试继续部署"
+    }
+    
+    # 验证配置文件
+    validate_configs || {
+        warn "配置验证失败，但将继续部署"
     }
     
     # 设置后端环境
