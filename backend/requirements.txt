@@ -1,0 +1,11 @@
+flask
+flask-restx
+flask-sqlalchemy
+flask-migrate
+flask-jwt-extended
+psycopg2-binary
+celery
+redis
+flask-cors
+python-dotenv
+bcrypt
