@@ -5,6 +5,7 @@ import { ShoppingCartOutlined, WarningOutlined, InboxOutlined } from '@ant-desig
 const Dashboard: React.FC = () => {
   return (
     <div>
+      <h2>仪表盘</h2>
       <Row gutter={16}>
         <Col span={8}>
           <Card>

@@ -81,6 +81,7 @@ const Product: React.FC = () => {
 
   return (
     <div style={{ background: '#fff', padding: 24, borderRadius: 12 }}>
+      <h2>商品管理</h2>
       <Space style={{ marginBottom: 16 }}>
         <Button type="primary" onClick={handleAdd}>新增商品</Button>
       </Space>
